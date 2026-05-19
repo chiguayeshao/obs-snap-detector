@@ -1,0 +1,15 @@
+# OBS Snap Detector - Windows Dependencies
+# Install: pip install -r requirements.txt
+
+# Screen capture (DXGI Desktop Duplication, same API as OBS)
+dxcam
+
+# AI detection
+ultralytics>=8.0.0
+
+# Image processing
+numpy
+Pillow
+
+# Global hotkeys (run terminal as Administrator)
+keyboard
