@@ -11,20 +11,20 @@ CAPTURE_MONITOR = 0        # 显示器索引：0 = 主屏幕
 # ── AI 检测 ───────────────────────────────────────────
 CONFIDENCE_THRESHOLD  = 0.04   # 绝对过滤阈值：4%兼顾远目标检测（低置信检测进Stage2更新现有轨迹，不创建新轨迹）
 NEW_TRACK_CONF        = 0.06   # 创建新轨迹所需最低置信度（6%，允许远目标T3/T4在6%+时创建轨迹）
-MODEL_NAME            = "yolo11s.pt"   # CPU 后备模型
+MODEL_NAME            = "yolo11m.pt"   # CPU 后备模型
 INFERENCE_IMGSZ       = 960    # 2K/960 最佳平衡；640最快（CPU 模式）
 DETECT_CLASSES        = [0]    # COCO: 0=person
 
 # ── GPU 加速（DirectML + ONNX）────────────────────────
-MODEL_ONNX_PATH       = "yolo11s.onnx"  # GPU 推理模型（yolo11s imgsz=960）
+MODEL_ONNX_PATH       = "yolo11m.onnx"  # GPU 推理模型（yolo11m imgsz=960，比yolo11s更好地检测远处T3/T4目标）
 USE_DIRECTML          = True   # True=GPU DirectML；False=CPU PyTorch
 NMS_IOU_THRESH        = 0.70   # ONNX 后处理 NMS IoU 阈值（提高至0.70允许并排/叠放目标共存）
 
 # ── 跟踪器参数（ByteTrack + Kalman）─────────────────
 TRACKER_IOU_THRESH    = 0.20   # IoU 主匹配阈值（提高至0.20：阻止大框抢邻近目标检测(IoU≈0.14)，保留躯干-全身匹配(IoU≈0.43)）
 TRACKER_HIGH_CONF     = 0.06   # 高置信分界：6%以下检测进Stage2（只更新现有轨迹），6%以上进Stage1+1b（可创建新轨迹）
-TRACKER_MAX_AGE       = 15     # CONFIRMED 轨迹最多允许连续未检测帧数（15帧@42FPS≈360ms：velocity freeze使框冻结原位不漂移，远目标能存活更长）
-TRACKER_MIN_HITS      = 1      # =1: 首次检测到即显示（无延迟），防单帧误检靠 NEW_TRACK_CONF
+TRACKER_MAX_AGE       = 3      # CONFIRMED 轨迹最多允许连续未检测帧数（3帧@42FPS≈70ms：视角转开时边框立即消失，避免残影≈1秒问题）
+TRACKER_MIN_HITS      = 2      # =2: 需要连续2帧检测才显示边框，过滤单帧噪声（防止T3/T4低置信单帧检测产生的扫描闪烁效果）
 TRACKER_CENTER_DIST_FALLBACK = 160.0  # snap-point Stage 1b 回退匹配阈值（像素）：头部snap差≈50px，不同目标≥168px
 TRACKER_DEDUP_DIST   = 170.0           # 去重距离（像素）：同人头部+身体bbox的snap间距≈158px<170px→去重；不同目标snap间距通常>200px不误阻
 TRACKER_REID_DIST    = 60.0            # 重识别距离（像素）：已消失轨迹在此距离内重新出现则复用旧ID（60px：同一目标小于此值，相邻目标通常>100px不误识别）
