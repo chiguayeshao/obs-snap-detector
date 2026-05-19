@@ -106,7 +106,7 @@ class Detector:
             import onnxruntime as ort
             avail = [p.lower() for p in ort.get_available_providers()]
             if 'dmlexecutionprovider' not in avail:
-                print("[Detector] ⚠ DirectML 不可用，请确认安装了 onnxruntime-directml")
+                print("[Detector] WARN: DirectML not available, install onnxruntime-directml")
                 return False
             providers = ['DmlExecutionProvider', 'CPUExecutionProvider']
             self._sess       = ort.InferenceSession(MODEL_ONNX_PATH, providers=providers)
@@ -117,14 +117,14 @@ class Detector:
             dummy = np.zeros((1, 3, self._imgsz, self._imgsz), dtype=np.float32)
             self._sess.run(None, {self._input_name: dummy})
             self._mode = 'directml'
-            print(f"[Detector] ✅ DirectML GPU 推理 | 输入 {self._imgsz}×{self._imgsz} "
-                  f"| 屏幕 {self._screen_w}×{self._screen_h}")
+            print(f"[Detector] OK DirectML GPU | input {self._imgsz}x{self._imgsz} "
+                  f"| screen {self._screen_w}x{self._screen_h}")
             return True
         except FileNotFoundError:
-            print(f"[Detector] ⚠ 找不到 {MODEL_ONNX_PATH}，回退 CPU")
+            print(f"[Detector] WARN: {MODEL_ONNX_PATH} not found, fallback CPU")
             return False
         except Exception as e:
-            print(f"[Detector] ⚠ DirectML 初始化失败: {e}")
+            print(f"[Detector] WARN: DirectML init failed: {e}")
             return False
 
     # ── PyTorch 后备 ─────────────────────────────────────────────────────────

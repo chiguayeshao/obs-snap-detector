@@ -25,7 +25,7 @@ class ScreenCapturer:
             import dxcam
             self._camera  = dxcam.create(device_idx=CAPTURE_MONITOR, output_color="RGB")
             self._backend = "dxcam"
-            print("[Capture] 后端: dxcam (DXGI) ✓")
+            print("[Capture] backend: dxcam (DXGI)")
         except Exception as e:
             print(f"[Capture] dxcam 初始化失败: {e}")
             print("[Capture] 回退到 mss (GDI) ...")
@@ -33,7 +33,7 @@ class ScreenCapturer:
                 import mss
                 self._mss_sct = mss.mss()
                 self._backend = "mss"
-                print("[Capture] 后端: mss (GDI) ✓")
+                print("[Capture] backend: mss (GDI)")
             except Exception as e2:
                 raise RuntimeError(
                     f"所有截帧后端均失败:\n  dxcam: {e}\n  mss: {e2}"

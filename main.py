@@ -203,7 +203,7 @@ def main():
                 print(
                     f"[Main] Cap:{fps['cap']:.0f}  Inf:{fps['inf']:.0f}  "
                     f"Ovl:{fps['ovl']:.0f}  | {len(last_detections)} 目标  "
-                    f"| {'🟢' if _enabled else '🔴'}"
+                    f"| {'ON' if _enabled else 'OFF'}"
                 )
 
             spent = time.perf_counter() - t0
