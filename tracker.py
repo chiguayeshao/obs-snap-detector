@@ -178,11 +178,16 @@ class _Track:
 
     def to_detection(self, screen_cx: int, screen_cy: int) -> Detection:
         x1, y1, x2, y2 = self.box_ints
+        # Use snap_ema (smoothed head position EMA) for distance_to_center.
+        # This prevents Kalman box jitter (±120px) from causing primary-target cycling.
+        sx, sy = self._snap_ema
+        snap_dist = ((sx - screen_cx) ** 2 + (sy - screen_cy) ** 2) ** 0.5
         return Detection(
             x1, y1, x2, y2, self.conf,
             track_id=self.id,
             _screen_cx=screen_cx,
             _screen_cy=screen_cy,
+            _snap_dist=snap_dist,
         )
 
 

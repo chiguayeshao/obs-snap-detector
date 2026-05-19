@@ -10,7 +10,7 @@ CAPTURE_MONITOR = 0        # 显示器索引：0 = 主屏幕
 
 # ── AI 检测 ───────────────────────────────────────────
 CONFIDENCE_THRESHOLD  = 0.04   # 绝对过滤阈值：4%兼顾远目标检测（低置信检测进Stage2更新现有轨迹，不创建新轨迹）
-NEW_TRACK_CONF        = 0.10   # 创建新轨迹所需最低置信度（10%，防误轨迹）
+NEW_TRACK_CONF        = 0.06   # 创建新轨迹所需最低置信度（6%，允许远目标T3/T4在6%+时创建轨迹）
 MODEL_NAME            = "yolo11s.pt"   # CPU 后备模型
 INFERENCE_IMGSZ       = 960    # 2K/960 最佳平衡；640最快（CPU 模式）
 DETECT_CLASSES        = [0]    # COCO: 0=person
@@ -23,11 +23,11 @@ NMS_IOU_THRESH        = 0.70   # ONNX 后处理 NMS IoU 阈值（提高至0.70�
 # ── 跟踪器参数（ByteTrack + Kalman）─────────────────
 TRACKER_IOU_THRESH    = 0.20   # IoU 主匹配阈值（提高至0.20：阻止大框抢邻近目标检测(IoU≈0.14)，保留躯干-全身匹配(IoU≈0.43)）
 TRACKER_HIGH_CONF     = 0.06   # 高置信分界：6%以下检测进Stage2（只更新现有轨迹），6%以上进Stage1+1b（可创建新轨迹）
-TRACKER_MAX_AGE       = 5      # CONFIRMED 轨迹最多允许连续未检测帧数（5帧@42FPS≈120ms：转视角后120ms消除幽灵框；velocity zeroing使框冻结原位不漂移）
+TRACKER_MAX_AGE       = 15     # CONFIRMED 轨迹最多允许连续未检测帧数（15帧@42FPS≈360ms：velocity freeze使框冻结原位不漂移，远目标能存活更长）
 TRACKER_MIN_HITS      = 1      # =1: 首次检测到即显示（无延迟），防单帧误检靠 NEW_TRACK_CONF
 TRACKER_CENTER_DIST_FALLBACK = 160.0  # snap-point Stage 1b 回退匹配阈值（像素）：头部snap差≈50px，不同目标≥168px
-TRACKER_DEDUP_DIST   = 170.0           # 去重距离（像素）：头部snap≈322，身体snap≈480，间距158px<170px→同一人不创建重复轨迹；不同目标间距>200px不误阻
-TRACKER_REID_DIST    = 80.0            # 重识别距离（像素）：已消失轨迹在此距离内重新出现则复用旧ID（同一目标≤60px，不同目标>200px）
+TRACKER_DEDUP_DIST   = 170.0           # 去重距离（像素）：同人头部+身体bbox的snap间距≈158px<170px→去重；不同目标snap间距通常>200px不误阻
+TRACKER_REID_DIST    = 60.0            # 重识别距离（像素）：已消失轨迹在此距离内重新出现则复用旧ID（60px：同一目标小于此值，相邻目标通常>100px不误识别）
 TRACKER_REID_TTL     = 500             # 重识别记忆帧数：记住已消失轨迹500帧≈12秒@42fps，用于远目标重识别（检测间隔5-15秒）
 TRACKER_GATE_DIST    = 150.0           # 备用参数（保留兼容）
 # 以下保留兼容旧代码
@@ -50,8 +50,8 @@ SHOW_SNAP_ZONE   = True
 
 # ── 覆盖层稳定参数 ───────────────────────────────────
 OVERLAY_MAX_POOL_SIZE  = 15    # canvas 元素池上限，防长时间运行后画布积累太多项目拖慢渲染
-PRIMARY_SWITCH_MARGIN  = 120   # 主目标切换迟滞（像素）：新目标需比当前主目标近120px才切换，防颜色闪烁
-PRIMARY_INHERIT_DIST   = 200   # 主目标继承距离（像素）：旧轨迹消失后，新出现的轨迹若在此距离内则继承主目标状态
+PRIMARY_SWITCH_MARGIN  = 50    # 主目标切换迟滞（像素）：新目标需比当前主目标近50px才切换（snap_ema稳定≈±5px，50px足够防止误切换）
+PRIMARY_INHERIT_DIST   = 80    # 主目标继承距离（像素）：旧轨迹消失后，新出现轨迹若在80px内则继承主目标（再识别系统已处理同位置复用，此为兜底）
 BOX_SNAP_PX            = 3     # 坐标像素捕捉阈值：变化<3px 不更新画布，消除微抖视觉噪声
 
 # ── 覆盖层颜色 ────────────────────────────────────────

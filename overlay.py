@@ -47,15 +47,8 @@ class Overlay:
         # Reusable pool of hidden item groups (avoids create_* on every new track)
         self._free_pool: list[dict[str, int]] = []
 
-        # Primary target hysteresis — only switch when new target is clearly closer
+        # Primary target: track ID of the nearest detected target
         self._primary_tid: int = -1
-
-        # Track previous primary to detect color-change frames (avoid redundant itemconfig)
-        self._prev_primary_tid: int = -1
-
-        # Last known snap_point of the primary target — used to inherit primary to
-        # replacement tracks when the primary track ID changes after camera rotation
-        self._primary_last_snap: tuple[int, int] | None = None
 
         # Last drawn box coords per track — pixel-snap avoids canvas update on tiny movement
         self._last_box: dict[int, tuple[int, int, int, int]] = {}
@@ -174,7 +167,7 @@ class Overlay:
             PRIMARY_TARGET_COLOR, HEAD_ZONE_COLOR,
             SNAP_POINT_COLOR, SNAP_ZONE_COLOR,
             SNAP_ZONE_RADIUS, SHOW_SNAP_ZONE, FPS_COLOR,
-            PRIMARY_SWITCH_MARGIN, BOX_SNAP_PX, PRIMARY_INHERIT_DIST,
+            BOX_SNAP_PX,
         )
 
         cv = self._canvas
@@ -190,7 +183,6 @@ class Overlay:
                 self._last_box.pop(tid, None)
                 self._last_label.pop(tid, None)
             self._primary_tid = -1
-            self._prev_primary_tid = -1
             self._root.update()
             return
 
@@ -232,38 +224,18 @@ class Overlay:
             self._last_box.pop(tid, None)
             self._last_label.pop(tid, None)
 
-        # ── Primary target hysteresis ─────────────────────────────────────────
-        prev_primary = self._prev_primary_tid
+        # ── Primary target: always the nearest track by snap_ema distance ───────
+        # snap_ema is stable (EMA-smoothed, not Kalman-jittered), so we can safely
+        # always pick the nearest without complex hysteresis causing lock-on issues.
+        # A 10px dead-zone prevents exact-tie flip-flop between equidistant targets.
+        prev_primary = self._primary_tid
         if detections:
             nearest = detections[0]
-            if self._primary_tid not in active_ids:
-                # Primary track died (camera pan / missed frames).
-                # Inherit: if any detection is near the last-known primary position,
-                # it is the same physical target with a new track ID → inherit primary.
-                inherited = False
-                if self._primary_last_snap is not None:
-                    px, py = self._primary_last_snap
-                    for d in detections:
-                        dspx, dspy = d.snap_point
-                        if ((dspx - px) ** 2 + (dspy - py) ** 2) ** 0.5 < PRIMARY_INHERIT_DIST:
-                            self._primary_tid = d.track_id
-                            inherited = True
-                            break
-                if not inherited:
-                    self._primary_tid = nearest.track_id
-            else:
-                cur = next((d for d in detections if d.track_id == self._primary_tid), None)
-                if (cur is None or
-                        nearest.distance_to_center
-                        < cur.distance_to_center - PRIMARY_SWITCH_MARGIN):
-                    self._primary_tid = nearest.track_id
-            # Update last-known primary snap_point for next-frame inheritance check
-            cur_primary = next((d for d in detections if d.track_id == self._primary_tid), None)
-            if cur_primary:
-                self._primary_last_snap = cur_primary.snap_point
+            cur = next((d for d in detections if d.track_id == self._primary_tid), None)
+            if cur is None or nearest.distance_to_center < cur.distance_to_center - 10:
+                self._primary_tid = nearest.track_id
         else:
             self._primary_tid = -1
-            self._primary_last_snap = None
 
         # ── Update / create items for active tracks ───────────────────────────
         for det in detections:
@@ -326,7 +298,6 @@ class Overlay:
                 cv.itemconfig(items['label'], text=label, fill=color, state='normal')
                 self._last_label[det.track_id] = label
 
-        self._prev_primary_tid = self._primary_tid
         self._root.update()
 
     def destroy(self):

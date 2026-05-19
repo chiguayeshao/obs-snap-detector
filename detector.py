@@ -35,6 +35,8 @@ class Detection:
     _screen_cx: int = field(default=960, repr=False)
     _screen_cy: int = field(default=540, repr=False)
 
+    _snap_dist: float = field(default=-1.0, repr=False)  # smoothed dist from tracker snap_ema; -1 = not set
+
     @property
     def center(self) -> tuple[int, int]:
         return ((self.x1 + self.x2) // 2, (self.y1 + self.y2) // 2)
@@ -61,6 +63,10 @@ class Detection:
 
     @property
     def distance_to_center(self) -> float:
+        # Prefer tracker's smoothed snap_ema distance (set by to_detection).
+        # Falls back to Kalman box snap_point for raw YOLO detections.
+        if self._snap_dist >= 0.0:
+            return self._snap_dist
         sx, sy = self.snap_point
         return ((sx - self._screen_cx) ** 2 + (sy - self._screen_cy) ** 2) ** 0.5
 
