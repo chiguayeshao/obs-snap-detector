@@ -50,6 +50,12 @@ class Overlay:
         # Primary target: track ID of the nearest detected target
         self._primary_tid: int = -1
 
+        # Stable primary-tracking state:
+        # _primary_last_dist — snap_ema distance of primary when last seen
+        # _primary_lost_frames — consecutive frames since primary track disappeared
+        self._primary_last_dist: float = float('inf')
+        self._primary_lost_frames: int = 0
+
         # Last drawn box coords per track — pixel-snap avoids canvas update on tiny movement
         self._last_box: dict[int, tuple[int, int, int, int]] = {}
 
@@ -183,6 +189,8 @@ class Overlay:
                 self._last_box.pop(tid, None)
                 self._last_label.pop(tid, None)
             self._primary_tid = -1
+            self._primary_last_dist = float('inf')
+            self._primary_lost_frames = 0
             self._root.update()
             return
 
@@ -224,18 +232,43 @@ class Overlay:
             self._last_box.pop(tid, None)
             self._last_label.pop(tid, None)
 
-        # ── Primary target: always the nearest track by snap_ema distance ───────
-        # snap_ema is stable (EMA-smoothed, not Kalman-jittered), so we can safely
-        # always pick the nearest without complex hysteresis causing lock-on issues.
-        # A 10px dead-zone prevents exact-tie flip-flop between equidistant targets.
+        # ── Primary target: stable nearest-track selection with hold & advantage ──
+        # Problem: T2's track briefly dies (3-frame YOLO miss) → T3/T4 momentarily
+        # become nearest → red box sweeps. Fix: two-layer protection:
+        #   1. Adaptive max-age (tracker.py): established tracks survive 3× longer.
+        #   2. Hold + advantage here: when primary disappears, hold for N frames AND
+        #      require new nearest to be PRIMARY_ADVANTAGE_PX closer than old primary was.
+        from config import (
+            PRIMARY_SWITCH_MARGIN, PRIMARY_HOLD_FRAMES, PRIMARY_ADVANTAGE_PX,
+        )
         prev_primary = self._primary_tid
-        if detections:
-            nearest = detections[0]
-            cur = next((d for d in detections if d.track_id == self._primary_tid), None)
-            if cur is None or nearest.distance_to_center < cur.distance_to_center - 10:
+        nearest = detections[0] if detections else None
+        cur = next((d for d in detections if d.track_id == self._primary_tid), None)
+
+        if cur is not None:
+            # Primary is still alive — update its last-known distance.
+            # Switch only if something clearly closer appeared (PRIMARY_SWITCH_MARGIN px).
+            self._primary_lost_frames = 0
+            self._primary_last_dist = cur.distance_to_center
+            if nearest is not None and nearest.distance_to_center < cur.distance_to_center - PRIMARY_SWITCH_MARGIN:
                 self._primary_tid = nearest.track_id
+                self._primary_last_dist = nearest.distance_to_center
+        elif nearest is not None:
+            # Primary track disappeared. Don't immediately hand over to another target:
+            # the new nearest must be significantly closer than old primary WAS, OR
+            # we must have waited PRIMARY_HOLD_FRAMES frames already.
+            self._primary_lost_frames += 1
+            new_dist = nearest.distance_to_center
+            if (new_dist < self._primary_last_dist - PRIMARY_ADVANTAGE_PX
+                    or self._primary_lost_frames >= PRIMARY_HOLD_FRAMES):
+                self._primary_tid = nearest.track_id
+                self._primary_last_dist = new_dist
+                self._primary_lost_frames = 0
+            # else: keep old primary_tid — no red box shown this frame (track gone)
         else:
             self._primary_tid = -1
+            self._primary_last_dist = float('inf')
+            self._primary_lost_frames = 0
 
         # ── Update / create items for active tracks ───────────────────────────
         for det in detections:

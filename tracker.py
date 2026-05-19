@@ -482,10 +482,16 @@ class ByteTracker:
             active_snaps.append((dsnx, dsny))
 
         # ── 6. Prune dead tracks — record snap positions for re-id first ───────
+        # Adaptive max-age: established tracks (many hits) survive longer to avoid
+        # brief YOLO misses causing track death + primary-sweep to farther targets.
+        # New/noisy tracks (few hits) die quickly to prevent ghost-sweep effect.
+        def _effective_max_age(t) -> int:
+            return TRACKER_MAX_AGE * 3 if t.hits >= 5 else TRACKER_MAX_AGE
+
         dead: list[_Track] = [
             t for t in self._tracks
             if (t.state == _TENTATIVE and t.miss_streak > 1)
-            or (t.state == _CONFIRMED and t.miss_streak >= TRACKER_MAX_AGE)
+            or (t.state == _CONFIRMED and t.miss_streak >= _effective_max_age(t))
         ]
         for dt in dead:
             # Only remember CONFIRMED tracks for re-id (tentative = unconfirmed false det)
