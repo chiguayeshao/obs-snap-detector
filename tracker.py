@@ -24,6 +24,7 @@ from config import (
     TRACKER_IOU_THRESH, TRACKER_HIGH_CONF,
     TRACKER_MAX_AGE, TRACKER_MIN_HITS,
     TRACKER_CENTER_DIST_FALLBACK, TRACKER_DEDUP_DIST, TRACKER_GATE_DIST,
+    TRACKER_REID_DIST, TRACKER_REID_TTL,
     HEAD_ZONE_RATIO,
 )
 
@@ -104,15 +105,18 @@ _CONFIRMED = 1   # confirmed, shown on overlay
 class _Track:
     _id_counter = 1
 
-    def __init__(self, det: Detection):
+    def __init__(self, det: Detection, reuse_id: int | None = None):
         cx = (det.x1 + det.x2) * 0.5
         cy = (det.y1 + det.y2) * 0.5
         w  = float(det.x2 - det.x1)
         h  = float(det.y2 - det.y1)
 
         self.kf = KalmanBoxFilter(cx, cy, w, h)
-        self.id = _Track._id_counter
-        _Track._id_counter += 1
+        if reuse_id is not None:
+            self.id = reuse_id
+        else:
+            self.id = _Track._id_counter
+            _Track._id_counter += 1
 
         self.state       = _TENTATIVE
         self.conf        = det.confidence
@@ -133,6 +137,12 @@ class _Track:
     def predict(self):
         self._box = self.kf.predict()
         self.miss_streak += 1
+        # Freeze velocity after first miss: prevents Kalman ghost box drift during
+        # camera rotation. The box stays at its last known position instead of
+        # continuing to extrapolate in the last-known motion direction.
+        if self.miss_streak >= 1:
+            self.kf.x[4] = 0.0  # vx = 0
+            self.kf.x[5] = 0.0  # vy = 0
 
     def update(self, det: Detection):
         cx = (det.x1 + det.x2) * 0.5
@@ -343,9 +353,15 @@ class ByteTracker:
 
     def __init__(self):
         self._tracks: list[_Track] = []
+        # Re-identification: remember snap positions of dead tracks.
+        # Entry: (snap_x, snap_y, track_id, expiry_frame)
+        self._dead_snaps: list[tuple] = []
+        self._frame_count: int = 0
 
     def reset(self):
         self._tracks.clear()
+        self._dead_snaps.clear()
+        self._frame_count = 0
         _Track._id_counter = 1
 
     def update(
@@ -356,6 +372,7 @@ class ByteTracker:
     ) -> list[Detection]:
 
         # ── 1. Predict all tracks ──────────────────────────────────────────────
+        self._frame_count += 1
         for t in self._tracks:
             t.predict()
 
@@ -431,6 +448,7 @@ class ByteTracker:
         # Seed snap list from EMA of ALL existing tracks
         active_snaps: list = [t._snap_ema for t in self._tracks]
         dedup_sq = TRACKER_DEDUP_DIST ** 2
+        reid_sq  = TRACKER_REID_DIST ** 2
 
         for di in unmatched_hd:
             if high_dets[di].confidence < NEW_TRACK_CONF:
@@ -443,19 +461,40 @@ class ByteTracker:
             )
             if too_close:
                 continue  # existing track covers this head position — skip
-            new_track = _Track(det)
+
+            # Re-identification: if a recently-dead track was at this position,
+            # reuse its ID so the target keeps a consistent ID across brief disappearances.
+            reuse_id = None
+            for idx, (sx, sy, old_id, _exp) in enumerate(self._dead_snaps):
+                if (sx - dsnx) ** 2 + (sy - dsny) ** 2 < reid_sq:
+                    reuse_id = old_id
+                    self._dead_snaps.pop(idx)
+                    break
+
+            new_track = _Track(det, reuse_id=reuse_id)
             self._tracks.append(new_track)
             # Register snap so subsequent dets in THIS SAME FRAME see it
             active_snaps.append((dsnx, dsny))
 
-        # ── 6. Prune dead tracks ───────────────────────────────────────────────
-        self._tracks = [
+        # ── 6. Prune dead tracks — record snap positions for re-id first ───────
+        dead: list[_Track] = [
             t for t in self._tracks
-            if not (
-                (t.state == _TENTATIVE and t.miss_streak > 1)
-                or (t.state == _CONFIRMED and t.miss_streak >= TRACKER_MAX_AGE)
-            )
+            if (t.state == _TENTATIVE and t.miss_streak > 1)
+            or (t.state == _CONFIRMED and t.miss_streak >= TRACKER_MAX_AGE)
         ]
+        for dt in dead:
+            # Only remember CONFIRMED tracks for re-id (tentative = unconfirmed false det)
+            if dt.state == _CONFIRMED:
+                self._dead_snaps.append(
+                    (dt._snap_ema[0], dt._snap_ema[1], dt.id,
+                     self._frame_count + TRACKER_REID_TTL)
+                )
+        # Expire old dead snaps
+        self._dead_snaps = [
+            s for s in self._dead_snaps if s[3] > self._frame_count
+        ]
+
+        self._tracks = [t for t in self._tracks if t not in dead]
 
         # ── 7. Return CONFIRMED tracks sorted by proximity to crosshair ───────
         cx, cy = screen_w // 2, screen_h // 2

@@ -23,10 +23,12 @@ NMS_IOU_THRESH        = 0.70   # ONNX 后处理 NMS IoU 阈值（提高至0.70�
 # ── 跟踪器参数（ByteTrack + Kalman）─────────────────
 TRACKER_IOU_THRESH    = 0.20   # IoU 主匹配阈值（提高至0.20：阻止大框抢邻近目标检测(IoU≈0.14)，保留躯干-全身匹配(IoU≈0.43)）
 TRACKER_HIGH_CONF     = 0.06   # 高置信分界：6%以下检测进Stage2（只更新现有轨迹），6%以上进Stage1+1b（可创建新轨迹）
-TRACKER_MAX_AGE       = 15     # CONFIRMED 轨迹最多允许连续未检测帧数（15帧@42FPS≈360ms：转视角后约360ms消除幽灵框，同时允许偶发目标存活更长）
+TRACKER_MAX_AGE       = 5      # CONFIRMED 轨迹最多允许连续未检测帧数（5帧@42FPS≈120ms：转视角后120ms消除幽灵框；velocity zeroing使框冻结原位不漂移）
 TRACKER_MIN_HITS      = 1      # =1: 首次检测到即显示（无延迟），防单帧误检靠 NEW_TRACK_CONF
 TRACKER_CENTER_DIST_FALLBACK = 160.0  # snap-point Stage 1b 回退匹配阈值（像素）：头部snap差≈50px，不同目标≥168px
 TRACKER_DEDUP_DIST   = 170.0           # 去重距离（像素）：头部snap≈322，身体snap≈480，间距158px<170px→同一人不创建重复轨迹；不同目标间距>200px不误阻
+TRACKER_REID_DIST    = 80.0            # 重识别距离（像素）：已消失轨迹在此距离内重新出现则复用旧ID（同一目标≤60px，不同目标>200px）
+TRACKER_REID_TTL     = 500             # 重识别记忆帧数：记住已消失轨迹500帧≈12秒@42fps，用于远目标重识别（检测间隔5-15秒）
 TRACKER_GATE_DIST    = 150.0           # 备用参数（保留兼容）
 # 以下保留兼容旧代码
 TRACKER_EMA_ALPHA     = 0.25
@@ -38,7 +40,7 @@ JUMP_SCALE            = 150.0
 # FPS 游戏中自己的手/武器永远在屏幕下方且面积很大，需过滤掉
 # 注意：阈值设置保守，避免误过滤近处大目标（cy_r可达0.65-0.75）
 BOTTOM_STRIP_RATIO   = 0.90   # 中心 Y > 此值的检测直接丢弃（绝对底部10%）
-HANDS_CENTER_Y_RATIO = 0.85   # 结合高度判断：中心 Y > 此值 且高度 > 下方阈值 → 丢弃
+HANDS_CENTER_Y_RATIO = 0.80   # 结合高度判断：中心 Y > 此值 且高度 > 下方阈值 → 丢弃（0.80更激进：抓住更多手部误检）
 HANDS_BOX_HEIGHT_RATIO = 0.12 # 框高 / 画面高 > 此值 且中心偏下 → 判定为自身手部
 
 # ── 瞄准点 / 头部区域 ────────────────────────────────
