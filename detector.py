@@ -89,6 +89,71 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, iou_thresh: float) -> list[int]:
     return keep
 
 
+def _vertical_merge(boxes: np.ndarray, scores: np.ndarray,
+                    cx_thresh: float = 50.0,
+                    gap_thresh: float = 50.0) -> tuple:
+    """
+    Merge YOLO body-part boxes for the same person into one hull bbox.
+
+    YOLO often detects head and body as separate boxes where:
+      - head:  y1=310, y2=430  (above the body)
+      - body:  y1=420, y2=1020 (shoulders to feet)
+    Containment NMS fails here because the head sticks ABOVE the body box
+    (containment ratio = 8%, not 50%).
+
+    This function groups boxes that share similar horizontal center (< cx_thresh)
+    and are vertically adjacent or overlapping (vertical gap < gap_thresh),
+    then merges each group into its bounding hull with max confidence.
+    Different targets are kept separate because their horizontal centers differ
+    by more than cx_thresh pixels.
+    """
+    n = len(boxes)
+    if n <= 1:
+        return boxes, scores
+
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    cxs = (boxes[:, 0] + boxes[:, 2]) * 0.5
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if abs(cxs[i] - cxs[j]) > cx_thresh:
+                continue
+            vert_gap = max(
+                0.0,
+                float(boxes[j, 1]) - float(boxes[i, 3]),
+                float(boxes[i, 1]) - float(boxes[j, 3]),
+            )
+            if vert_gap <= gap_thresh:
+                union(i, j)
+
+    groups: dict[int, list[int]] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+
+    out_boxes: list = []
+    out_scores: list = []
+    for indices in groups.values():
+        gb = boxes[indices]
+        out_boxes.append([gb[:, 0].min(), gb[:, 1].min(),
+                          gb[:, 2].max(), gb[:, 3].max()])
+        out_scores.append(float(scores[indices].max()))
+
+    return (np.array(out_boxes, dtype=np.float32),
+            np.array(out_scores, dtype=np.float32))
+
+
 # ── 检测器 ───────────────────────────────────────────────────────────────────
 class Detector:
     def __init__(self, screen_size: tuple[int, int] = (2560, 1440)):
@@ -177,6 +242,10 @@ class Detector:
         keep  = _nms(boxes, scores, NMS_IOU_THRESH)
         boxes  = boxes[keep]
         scores = scores[keep]
+
+        # Skip vertical_merge: it was merging separate targets arranged near-to-far
+        # (all share similar cx on screen) into a single detection, causing raw:1.
+        # Instead, DEDUP_DIST=170px in the tracker blocks head+body duplicate tracks.
 
         # Undo letterbox → 原始帧坐标
         boxes[:, [0, 2]] = np.clip((boxes[:, [0, 2]] - pad_x) / scale, 0, frame_w)

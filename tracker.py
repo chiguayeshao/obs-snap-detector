@@ -23,7 +23,8 @@ from config import (
     CONFIDENCE_THRESHOLD, NEW_TRACK_CONF,
     TRACKER_IOU_THRESH, TRACKER_HIGH_CONF,
     TRACKER_MAX_AGE, TRACKER_MIN_HITS,
-    TRACKER_CENTER_DIST_FALLBACK, TRACKER_DEDUP_DIST,
+    TRACKER_CENTER_DIST_FALLBACK, TRACKER_DEDUP_DIST, TRACKER_GATE_DIST,
+    HEAD_ZONE_RATIO,
 )
 
 
@@ -119,6 +120,12 @@ class _Track:
         self.miss_streak = 0   # consecutive missed frames
         self._box        = (float(det.x1), float(det.y1),
                             float(det.x2), float(det.y2))
+        # EMA snap_point: running smoothed HEAD POSITION across box-size changes.
+        # Using snap = top-center of HEAD_ZONE_RATIO of detection bbox.
+        # This stays stable even when YOLO alternates between full-body and head-only
+        # detections — it's the anchor used for Stage 1b matching and DEDUP.
+        head_h0 = max(h * HEAD_ZONE_RATIO, 10.0)
+        self._snap_ema: tuple = (cx, float(det.y1) + head_h0 * 0.5)
         # With MIN_HITS=1 the very first detection immediately confirms the track
         if self.hits >= TRACKER_MIN_HITS:
             self.state = _CONFIRMED
@@ -133,14 +140,26 @@ class _Track:
         w  = float(det.x2 - det.x1)
         h  = float(det.y2 - det.y1)
         self._box = self.kf.update(cx, cy, w, h)
-        # Asymmetric EMA: confidence rises quickly, decays slowly
-        # Prevents the "label keeps decreasing" visual artifact
-        alpha = 0.7 if det.confidence >= self.conf else 0.2
+        # Slow EMA for confidence display stability:
+        # alpha=0.12 means ~8-frame time constant → confidence changes smoothly
+        # (prevents rapid flicker between YOLO's head-only and body-only detections)
+        alpha = 0.12
         self.conf        = alpha * det.confidence + (1.0 - alpha) * self.conf
         self.hits       += 1
         self.miss_streak = 0
         if self.state == _TENTATIVE and self.hits >= TRACKER_MIN_HITS:
             self.state = _CONFIRMED
+        # Update EMA snap_point from the NEW detection's bbox (not Kalman predicted box).
+        # Using alpha=0.4: fast enough to track real head movement, smooth enough to
+        # ignore single-frame bbox jitter.
+        dh = max(h * HEAD_ZONE_RATIO, 10.0)
+        dsnx = cx
+        dsny = float(det.y1) + dh * 0.5
+        alpha_s = 0.40
+        self._snap_ema = (
+            alpha_s * dsnx + (1.0 - alpha_s) * self._snap_ema[0],
+            alpha_s * dsny + (1.0 - alpha_s) * self._snap_ema[1],
+        )
 
     @property
     def box_ints(self) -> tuple:
@@ -180,6 +199,41 @@ def _iou_matrix(tracks: list, dets: list) -> np.ndarray:
     return inter / np.maximum(union, 1e-6)
 
 
+def _gated_iou_matrix(tracks: list, dets: list, max_snap_dist: float) -> np.ndarray:
+    """
+    IoU matrix with a snap-point distance gate.
+
+    After computing the standard IoU, zeroes out any cell where the Euclidean
+    distance between track._snap_ema and the detection's head snap_point exceeds
+    max_snap_dist pixels.
+
+    Why this fixes near-target drift:
+      A near-target track (T6) has a large Kalman body box (~300x600px) that can
+      overlap a medium-distance detection with IoU≈0.26.  The greedy matcher then
+      assigns T6 to the wrong detection, causing it to drift.  But the snap_ema of
+      T6 (head position of near target) is ~120px away from the medium detection's
+      snap_point — gating kills that false match, so T6 stays on the near target.
+
+    Safe zone: at 39fps the near-target moves <5px/frame; gate=120px allows >3x
+    that in any direction, so true fast-moving game targets are never blocked.
+    """
+    iou = _iou_matrix(tracks, dets)
+    if iou.size == 0:
+        return iou
+
+    # Use track snap_ema vs det head snap for the gate
+    def _det_snap_g(d):
+        head_h = max((d.y2 - d.y1) * HEAD_ZONE_RATIO, 10.0)
+        return (d.x1 + d.x2) * 0.5, d.y1 + head_h * 0.5
+
+    ts = np.array([t._snap_ema for t in tracks], dtype=np.float32)   # [N, 2]
+    ds = np.array([_det_snap_g(d) for d in dets], dtype=np.float32)  # [M, 2]
+    diff = ts[:, None, :] - ds[None, :, :]
+    snap_dist = np.sqrt((diff ** 2).sum(axis=2))   # [N, M]
+    iou[snap_dist > max_snap_dist] = 0.0
+    return iou
+
+
 def _greedy_match(iou: np.ndarray, thresh: float):
     """
     Greedy max-IoU matching (near-optimal for N < 20).
@@ -217,6 +271,34 @@ def _center_dist_matrix(tracks: list, dets: list) -> np.ndarray:
                    for d in dets], dtype=np.float32)    # [M, 2]
     diff = tc[:, None, :] - dc[None, :, :]  # [N, M, 2]
     return np.sqrt((diff**2).sum(axis=2))   # [N, M]
+
+
+def _snap_dist_matrix(tracks: list, dets: list) -> np.ndarray:
+    """
+    Returns [N_tracks, N_dets] snap-point Euclidean distance matrix (pixels).
+
+    Uses track._snap_ema — a smoothed running estimate of each track's head position
+    that is updated ONLY from real detections (not Kalman predictions).
+    This is stable even as YOLO alternates between full-body and head-only boxes:
+    the EMA converges to the true head position and stays there.
+
+    For detections, computes snap_point on-the-fly from the YOLO bbox.
+    """
+    n, m = len(tracks), len(dets)
+    if n == 0 or m == 0:
+        return np.full((n, m), np.inf, dtype=np.float32)
+
+    # Use stored EMA for tracks — immune to Kalman box-size drift
+    ts = np.array([t._snap_ema for t in tracks], dtype=np.float32)
+
+    # Compute snap_point from raw detection bbox
+    def _det_snap(d):
+        head_h = max((d.y2 - d.y1) * HEAD_ZONE_RATIO, 10.0)
+        return (d.x1 + d.x2) * 0.5, d.y1 + head_h * 0.5
+    ds = np.array([_det_snap(d) for d in dets], dtype=np.float32)
+
+    diff = ts[:, None, :] - ds[None, :, :]
+    return np.sqrt((diff ** 2).sum(axis=2))
 
 
 def _greedy_match_by_dist(dist: np.ndarray, max_dist: float):
@@ -282,7 +364,10 @@ class ByteTracker:
         low_dets  = [d for d in detections
                      if CONFIDENCE_THRESHOLD <= d.confidence < TRACKER_HIGH_CONF]
 
-        # ── 3. Stage 1: match high-conf dets → ALL tracks ─────────────────────
+        # ── 3. Stage 1: IoU match high-conf dets → ALL tracks ─────────────────
+        # TRACKER_IOU_THRESH=0.20: high enough to block cross-target IoU≈0.14,
+        # still catches torso-inside-body IoU≈0.43 and frame-to-frame same-size boxes.
+        # Head-inside-body (IoU≈0.07-0.12) is NOT matched here; Stage 1b handles it.
         if self._tracks and high_dets:
             iou1 = _iou_matrix(self._tracks, high_dets)
             pairs1, unmatched_t1, unmatched_hd = _greedy_match(iou1, TRACKER_IOU_THRESH)
@@ -292,18 +377,18 @@ class ByteTracker:
             unmatched_t1 = list(range(len(self._tracks)))
             unmatched_hd = list(range(len(high_dets)))
 
-        # ── 3b. Stage 1b: center-distance fallback ────────────────────────────
-        # When Kalman overshoots slightly, IoU drops below threshold even though
-        # track and detection are the same target.  Use center-point distance as
-        # a secondary match so we don't create a duplicate track.
+        # ── 3b. Stage 1b: snap-point distance fallback ───────────────────────
+        # Catches head-inside-body mismatches that Stage 1 IoU can't handle:
+        # head snap_y ≈ 330px, full-body snap_y ≈ 380px → delta ≈ 50px << 160px.
+        # Cross-target snap gap ≈ 168px > 160px → blocked.
         if unmatched_t1 and unmatched_hd:
             conf_unm_ti = [ti for ti in unmatched_t1
                            if self._tracks[ti].state == _CONFIRMED]
             if conf_unm_ti:
                 sub_tracks = [self._tracks[ti] for ti in conf_unm_ti]
                 sub_dets   = [high_dets[di]    for di in unmatched_hd]
-                cdist = _center_dist_matrix(sub_tracks, sub_dets)
-                pairs1b, _, _ = _greedy_match_by_dist(cdist, TRACKER_CENTER_DIST_FALLBACK)
+                sdist = _snap_dist_matrix(sub_tracks, sub_dets)
+                pairs1b, _, _ = _greedy_match_by_dist(sdist, TRACKER_CENTER_DIST_FALLBACK)
                 matched_hd_1b: set[int] = set()
                 for subi, subdi in pairs1b:
                     orig_ti = conf_unm_ti[subi]
@@ -315,6 +400,8 @@ class ByteTracker:
                     unmatched_hd = [di for di in unmatched_hd if di not in matched_hd_1b]
 
         # ── 4. Stage 2: match low-conf dets → remaining CONFIRMED tracks ──────
+        # Use snap-dist (not IoU) so that low-conf partial-body dets can still
+        # match large-box tracks (head vs full-body IoU is too low for IoU threshold).
         still_unmatched_t = set(unmatched_t1)
         confirmed_remaining = [(ti, self._tracks[ti])
                                for ti in unmatched_t1
@@ -322,35 +409,44 @@ class ByteTracker:
         if confirmed_remaining and low_dets:
             rc_tracks = [t for _, t in confirmed_remaining]
             rc_idx    = [i for i, _ in confirmed_remaining]
-            iou2 = _iou_matrix(rc_tracks, low_dets)
-            low_thresh = max(TRACKER_IOU_THRESH * 0.6, 0.10)
-            pairs2, _, _ = _greedy_match(iou2, low_thresh)
+            sdist2 = _snap_dist_matrix(rc_tracks, low_dets)
+            pairs2, _, _ = _greedy_match_by_dist(sdist2, TRACKER_CENTER_DIST_FALLBACK)
             for ti2, di2 in pairs2:
                 orig_ti = rc_idx[ti2]
                 self._tracks[orig_ti].update(low_dets[di2])
                 still_unmatched_t.discard(orig_ti)
 
         # ── 5. Create new TENTATIVE tracks from unmatched high-conf dets ──────
-        # Dedup: skip creating a new track if any CONFIRMED track is already
-        # covering this detection's region (prevents duplicate track oscillation).
-        confirmed_boxes = [(0.5*(t._box[0]+t._box[2]), 0.5*(t._box[1]+t._box[3]))
-                           for t in self._tracks if t.state == _CONFIRMED]
-        confirmed_cx = np.array([c[0] for c in confirmed_boxes], dtype=np.float32) \
-                       if confirmed_boxes else None
-        confirmed_cy = np.array([c[1] for c in confirmed_boxes], dtype=np.float32) \
-                       if confirmed_boxes else None
+        # DEDUP using EMA snap_point: compare the SMOOTHED HEAD POSITION stored in
+        # each track against the new detection's snap_point.
+        # t._snap_ema is a running EMA updated only from real detections — it doesn't
+        # drift with Kalman predictions. This ensures:
+        # - Same-target duplicate boxes (full-body + head-only) are blocked even when
+        #   both arrive in the same frame (active_snaps is updated after each new track).
+        # - Distinct targets with different head positions are NOT blocked.
+        def _det_snap(d):
+            head_h = max((d.y2 - d.y1) * HEAD_ZONE_RATIO, 10.0)
+            return (d.x1 + d.x2) * 0.5, d.y1 + head_h * 0.5
+
+        # Seed snap list from EMA of ALL existing tracks
+        active_snaps: list = [t._snap_ema for t in self._tracks]
+        dedup_sq = TRACKER_DEDUP_DIST ** 2
 
         for di in unmatched_hd:
             if high_dets[di].confidence < NEW_TRACK_CONF:
                 continue
             det = high_dets[di]
-            if confirmed_cx is not None:
-                dcx = 0.5 * (det.x1 + det.x2)
-                dcy = 0.5 * (det.y1 + det.y2)
-                dists = np.sqrt((confirmed_cx - dcx)**2 + (confirmed_cy - dcy)**2)
-                if dists.min() < TRACKER_DEDUP_DIST:
-                    continue  # existing confirmed track already covers this region
-            self._tracks.append(_Track(det))
+            dsnx, dsny = _det_snap(det)
+            too_close = any(
+                (sx - dsnx) ** 2 + (sy - dsny) ** 2 < dedup_sq
+                for sx, sy in active_snaps
+            )
+            if too_close:
+                continue  # existing track covers this head position — skip
+            new_track = _Track(det)
+            self._tracks.append(new_track)
+            # Register snap so subsequent dets in THIS SAME FRAME see it
+            active_snaps.append((dsnx, dsny))
 
         # ── 6. Prune dead tracks ───────────────────────────────────────────────
         self._tracks = [

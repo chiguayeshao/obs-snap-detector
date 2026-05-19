@@ -144,6 +144,7 @@ def main():
 
     last_frame      = None
     last_detections = []
+    last_raw_count  = 0   # raw YOLO detection count before tracker
     cap_size        = None
     fps             = {"cap": 0.0, "inf": 0.0, "ovl": 0.0}
     ovl_count       = 0
@@ -173,6 +174,7 @@ def main():
             # 获取最新检测结果，用 tracker 平滑坐标
             try:
                 last_frame, raw_detections = _detection_queue.get_nowait()
+                last_raw_count = len(raw_detections)
                 if cap_size is None and last_frame is not None:
                     cap_size = (last_frame.shape[1], last_frame.shape[0])
                     if cap_size != (sw, sh):
@@ -200,10 +202,15 @@ def main():
                 fps["ovl"] = ovl_count / elapsed
                 ovl_count  = 0
                 fps_timer  = time.perf_counter()
+                # Build per-track detail string for debugging
+                det_info = "  ".join(
+                    f"T{d.track_id}:{int(d.confidence*100)}%/{int(d.distance_to_center)}px"
+                    for d in last_detections
+                ) if last_detections else "none"
                 print(
                     f"[Main] Cap:{fps['cap']:.0f}  Inf:{fps['inf']:.0f}  "
-                    f"Ovl:{fps['ovl']:.0f}  | {len(last_detections)} 目标  "
-                    f"| {'ON' if _enabled else 'OFF'}"
+                    f"Ovl:{fps['ovl']:.0f}  | raw:{last_raw_count} trk:{len(last_detections)} "
+                    f"| {det_info}"
                 )
 
             spent = time.perf_counter() - t0
