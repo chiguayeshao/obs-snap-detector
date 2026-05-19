@@ -244,8 +244,8 @@ class Overlay:
                 if self._primary_last_snap is not None:
                     px, py = self._primary_last_snap
                     for d in detections:
-                        sx, sy = d.snap_point
-                        if ((sx - px) ** 2 + (sy - py) ** 2) ** 0.5 < PRIMARY_INHERIT_DIST:
+                        dspx, dspy = d.snap_point
+                        if ((dspx - px) ** 2 + (dspy - py) ** 2) ** 0.5 < PRIMARY_INHERIT_DIST:
                             self._primary_tid = d.track_id
                             inherited = True
                             break
