@@ -53,6 +53,10 @@ class Overlay:
         # Track previous primary to detect color-change frames (avoid redundant itemconfig)
         self._prev_primary_tid: int = -1
 
+        # Last known snap_point of the primary target — used to inherit primary to
+        # replacement tracks when the primary track ID changes after camera rotation
+        self._primary_last_snap: tuple[int, int] | None = None
+
         # Last drawn box coords per track — pixel-snap avoids canvas update on tiny movement
         self._last_box: dict[int, tuple[int, int, int, int]] = {}
 
@@ -170,7 +174,7 @@ class Overlay:
             PRIMARY_TARGET_COLOR, HEAD_ZONE_COLOR,
             SNAP_POINT_COLOR, SNAP_ZONE_COLOR,
             SNAP_ZONE_RADIUS, SHOW_SNAP_ZONE, FPS_COLOR,
-            PRIMARY_SWITCH_MARGIN, BOX_SNAP_PX,
+            PRIMARY_SWITCH_MARGIN, BOX_SNAP_PX, PRIMARY_INHERIT_DIST,
         )
 
         cv = self._canvas
@@ -233,15 +237,33 @@ class Overlay:
         if detections:
             nearest = detections[0]
             if self._primary_tid not in active_ids:
-                self._primary_tid = nearest.track_id
+                # Primary track died (camera pan / missed frames).
+                # Inherit: if any detection is near the last-known primary position,
+                # it is the same physical target with a new track ID → inherit primary.
+                inherited = False
+                if self._primary_last_snap is not None:
+                    px, py = self._primary_last_snap
+                    for d in detections:
+                        sx, sy = d.snap_point
+                        if ((sx - px) ** 2 + (sy - py) ** 2) ** 0.5 < PRIMARY_INHERIT_DIST:
+                            self._primary_tid = d.track_id
+                            inherited = True
+                            break
+                if not inherited:
+                    self._primary_tid = nearest.track_id
             else:
                 cur = next((d for d in detections if d.track_id == self._primary_tid), None)
                 if (cur is None or
                         nearest.distance_to_center
                         < cur.distance_to_center - PRIMARY_SWITCH_MARGIN):
                     self._primary_tid = nearest.track_id
+            # Update last-known primary snap_point for next-frame inheritance check
+            cur_primary = next((d for d in detections if d.track_id == self._primary_tid), None)
+            if cur_primary:
+                self._primary_last_snap = cur_primary.snap_point
         else:
             self._primary_tid = -1
+            self._primary_last_snap = None
 
         # ── Update / create items for active tracks ───────────────────────────
         for det in detections:
@@ -290,10 +312,10 @@ class Overlay:
                               outline=SNAP_POINT_COLOR, state='normal')
 
             # ── Label: rounded values + cache to skip unchanged text ──────────
-            # Round confidence to nearest 5%, distance to nearest 10px
+            # Round confidence to nearest 10%, distance to nearest 30px
             # → label changes only when crossing threshold, not every frame
-            conf_r = int(round(det.confidence / 0.05) * 5)
-            dist_r = int(round(det.distance_to_center / 10) * 10)
+            conf_r = int(round(det.confidence / 0.10) * 10)
+            dist_r = int(round(det.distance_to_center / 30) * 30)
             if is_primary:
                 label = f"{conf_r}%  {dist_r}px"
             else:

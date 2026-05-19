@@ -23,6 +23,7 @@ from config import (
     CONFIDENCE_THRESHOLD, NEW_TRACK_CONF,
     TRACKER_IOU_THRESH, TRACKER_HIGH_CONF,
     TRACKER_MAX_AGE, TRACKER_MIN_HITS,
+    TRACKER_CENTER_DIST_FALLBACK, TRACKER_DEDUP_DIST,
 )
 
 
@@ -62,9 +63,10 @@ class KalmanBoxFilter:
         # Process noise: allow large velocity changes (fast acceleration in-game)
         self.Q = np.diag([1., 1., 2., 2., 20., 20.]).astype(np.float64)
 
-        # Measurement noise: increased to smooth YOLO box jitter (was [4,4,9,9])
+        # Measurement noise: increased to smooth YOLO box jitter
         # Higher R → Kalman trusts prediction more → less per-frame shimmer
-        self.R = np.diag([16., 16., 36., 36.]).astype(np.float64)
+        # σ≈8px position, σ≈10px size — good balance for fast-moving game targets
+        self.R = np.diag([64., 64., 100., 100.]).astype(np.float64)
 
     def predict(self) -> tuple:
         """Advance state by one frame using constant-velocity model."""
@@ -203,6 +205,45 @@ def _greedy_match(iou: np.ndarray, thresh: float):
     return pairs, unmatched_t, unmatched_d
 
 
+def _center_dist_matrix(tracks: list, dets: list) -> np.ndarray:
+    """Returns [N_tracks, N_dets] center-to-center Euclidean distance matrix (pixels)."""
+    n, m = len(tracks), len(dets)
+    if n == 0 or m == 0:
+        return np.full((n, m), np.inf, dtype=np.float32)
+    # Use _box (x1,y1,x2,y2) center — most current estimate (Kalman predicted or updated)
+    tc = np.array([[0.5*(t._box[0]+t._box[2]), 0.5*(t._box[1]+t._box[3])]
+                   for t in tracks], dtype=np.float32)  # [N, 2]
+    dc = np.array([[0.5*(d.x1+d.x2), 0.5*(d.y1+d.y2)]
+                   for d in dets], dtype=np.float32)    # [M, 2]
+    diff = tc[:, None, :] - dc[None, :, :]  # [N, M, 2]
+    return np.sqrt((diff**2).sum(axis=2))   # [N, M]
+
+
+def _greedy_match_by_dist(dist: np.ndarray, max_dist: float):
+    """
+    Greedy min-distance matching.
+    Returns: ([(track_idx, det_idx)], unmatched_track_idxs, unmatched_det_idxs)
+    """
+    n_t, n_d = dist.shape
+    used_t: set[int] = set()
+    used_d: set[int] = set()
+    pairs:  list[tuple[int, int]] = []
+
+    flat = np.argsort(dist.flatten())  # ascending distance
+    for idx in flat:
+        ti, di = divmod(int(idx), n_d)
+        if dist[ti, di] > max_dist:
+            break
+        if ti not in used_t and di not in used_d:
+            pairs.append((ti, di))
+            used_t.add(ti)
+            used_d.add(di)
+
+    unmatched_t = [i for i in range(n_t) if i not in used_t]
+    unmatched_d = [i for i in range(n_d) if i not in used_d]
+    return pairs, unmatched_t, unmatched_d
+
+
 # ── ByteTracker ───────────────────────────────────────────────────────────────
 
 class ByteTracker:
@@ -251,6 +292,28 @@ class ByteTracker:
             unmatched_t1 = list(range(len(self._tracks)))
             unmatched_hd = list(range(len(high_dets)))
 
+        # ── 3b. Stage 1b: center-distance fallback ────────────────────────────
+        # When Kalman overshoots slightly, IoU drops below threshold even though
+        # track and detection are the same target.  Use center-point distance as
+        # a secondary match so we don't create a duplicate track.
+        if unmatched_t1 and unmatched_hd:
+            conf_unm_ti = [ti for ti in unmatched_t1
+                           if self._tracks[ti].state == _CONFIRMED]
+            if conf_unm_ti:
+                sub_tracks = [self._tracks[ti] for ti in conf_unm_ti]
+                sub_dets   = [high_dets[di]    for di in unmatched_hd]
+                cdist = _center_dist_matrix(sub_tracks, sub_dets)
+                pairs1b, _, _ = _greedy_match_by_dist(cdist, TRACKER_CENTER_DIST_FALLBACK)
+                matched_hd_1b: set[int] = set()
+                for subi, subdi in pairs1b:
+                    orig_ti = conf_unm_ti[subi]
+                    orig_di = unmatched_hd[subdi]
+                    self._tracks[orig_ti].update(high_dets[orig_di])
+                    matched_hd_1b.add(orig_di)
+                    unmatched_t1.remove(orig_ti)
+                if matched_hd_1b:
+                    unmatched_hd = [di for di in unmatched_hd if di not in matched_hd_1b]
+
         # ── 4. Stage 2: match low-conf dets → remaining CONFIRMED tracks ──────
         still_unmatched_t = set(unmatched_t1)
         confirmed_remaining = [(ti, self._tracks[ti])
@@ -268,9 +331,26 @@ class ByteTracker:
                 still_unmatched_t.discard(orig_ti)
 
         # ── 5. Create new TENTATIVE tracks from unmatched high-conf dets ──────
+        # Dedup: skip creating a new track if any CONFIRMED track is already
+        # covering this detection's region (prevents duplicate track oscillation).
+        confirmed_boxes = [(0.5*(t._box[0]+t._box[2]), 0.5*(t._box[1]+t._box[3]))
+                           for t in self._tracks if t.state == _CONFIRMED]
+        confirmed_cx = np.array([c[0] for c in confirmed_boxes], dtype=np.float32) \
+                       if confirmed_boxes else None
+        confirmed_cy = np.array([c[1] for c in confirmed_boxes], dtype=np.float32) \
+                       if confirmed_boxes else None
+
         for di in unmatched_hd:
-            if high_dets[di].confidence >= NEW_TRACK_CONF:
-                self._tracks.append(_Track(high_dets[di]))
+            if high_dets[di].confidence < NEW_TRACK_CONF:
+                continue
+            det = high_dets[di]
+            if confirmed_cx is not None:
+                dcx = 0.5 * (det.x1 + det.x2)
+                dcy = 0.5 * (det.y1 + det.y2)
+                dists = np.sqrt((confirmed_cx - dcx)**2 + (confirmed_cy - dcy)**2)
+                if dists.min() < TRACKER_DEDUP_DIST:
+                    continue  # existing confirmed track already covers this region
+            self._tracks.append(_Track(det))
 
         # ── 6. Prune dead tracks ───────────────────────────────────────────────
         self._tracks = [

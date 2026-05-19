@@ -10,21 +10,23 @@ CAPTURE_MONITOR = 0        # 显示器索引：0 = 主屏幕
 
 # ── AI 检测 ───────────────────────────────────────────
 CONFIDENCE_THRESHOLD  = 0.12   # 低阈值维持已有轨迹（配合 NEW_TRACK_CONF 使用）
-NEW_TRACK_CONF        = 0.20   # 创建新轨迹所需最低置信度（防误检闪烁）
+NEW_TRACK_CONF        = 0.15   # 创建新轨迹所需最低置信度（降低以检测远处目标）
 MODEL_NAME            = "yolo11s.pt"   # CPU 后备模型
 INFERENCE_IMGSZ       = 1280   # 2K最佳；4K用960；640最快（CPU 模式）
 DETECT_CLASSES        = [0]    # COCO: 0=person
 
 # ── GPU 加速（DirectML + ONNX）────────────────────────
-MODEL_ONNX_PATH       = "yolo11s_1280.onnx"  # GPU 推理模型（imgsz=1280）
+MODEL_ONNX_PATH       = "yolo11n.onnx"       # GPU 推理模型（yolo11n imgsz=960，比s快3x）
 USE_DIRECTML          = True   # True=GPU DirectML；False=CPU PyTorch
 NMS_IOU_THRESH        = 0.45   # ONNX 后处理 NMS IoU 阈值
 
 # ── 跟踪器参数（ByteTrack + Kalman）─────────────────
-TRACKER_IOU_THRESH    = 0.25   # IoU 匹配阈值（低于此值不匹配）
-TRACKER_HIGH_CONF     = 0.25   # 第一阶段匹配用高置信度阈值
-TRACKER_MAX_AGE       = 2      # CONFIRMED 轨迹最多允许连续未检测帧数（2帧@60FPS≈33ms，快速清除残留）
+TRACKER_IOU_THRESH    = 0.15   # IoU 匹配阈值（降低以容忍 Kalman 预测轻微偏差）
+TRACKER_HIGH_CONF     = 0.15   # 第一阶段匹配用高置信度阈值（与 NEW_TRACK_CONF 统一，检测远目标）
+TRACKER_MAX_AGE       = 3      # CONFIRMED 轨迹最多允许连续未检测帧数（3帧@50FPS≈60ms）
 TRACKER_MIN_HITS      = 1      # =1: 首次检测到即显示（无延迟），防单帧误检靠 NEW_TRACK_CONF
+TRACKER_CENTER_DIST_FALLBACK = 120.0  # 中心距离回退匹配阈值（像素）：IoU 不足时用中心距离兜底（扩大以容忍更大的 Kalman 预测偏差）
+TRACKER_DEDUP_DIST   = 150.0          # 去重距离（像素）：新轨迹距离已有 CONFIRMED 轨迹太近则跳过（防止相机移动导致的重复轨迹）
 # 以下保留兼容旧代码
 TRACKER_EMA_ALPHA     = 0.25
 TRACKER_TTL           = 10
@@ -44,8 +46,9 @@ SHOW_SNAP_ZONE   = True
 
 # ── 覆盖层稳定参数 ───────────────────────────────────
 OVERLAY_MAX_POOL_SIZE  = 15    # canvas 元素池上限，防长时间运行后画布积累太多项目拖慢渲染
-PRIMARY_SWITCH_MARGIN  = 80    # 主目标切换迟滞（像素）：新目标需比当前主目标近80px才切换，防颜色闪烁
-BOX_SNAP_PX            = 2     # 坐标像素捕捉阈值：变化<2px 不更新画布，消除微抖视觉噪声
+PRIMARY_SWITCH_MARGIN  = 120   # 主目标切换迟滞（像素）：新目标需比当前主目标近120px才切换，防颜色闪烁
+PRIMARY_INHERIT_DIST   = 200   # 主目标继承距离（像素）：旧轨迹消失后，新出现的轨迹若在此距离内则继承主目标状态
+BOX_SNAP_PX            = 3     # 坐标像素捕捉阈值：变化<3px 不更新画布，消除微抖视觉噪声
 
 # ── 覆盖层颜色 ────────────────────────────────────────
 BOX_COLOR            = "#00FF41"   # 普通目标框（黑客绿）
