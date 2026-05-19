@@ -1,15 +1,26 @@
-# OBS Snap Detector - Windows Dependencies
-# Install: pip install -r requirements.txt
+# OBS Snap Detector - 依赖
+# 安装: pip install -r requirements.txt
 
-# Screen capture (DXGI Desktop Duplication, same API as OBS)
+# 屏幕截帧 (DXGI Desktop Duplication，与 OBS 同 API)
 dxcam
 
-# AI detection
+# 截帧备用后端（dxcam 失败时自动使用）
+mss
+
+# AI 检测（CPU PyTorch 后备）
 ultralytics>=8.0.0
 
-# Image processing
+# GPU 加速推理（DirectML，无需 CUDA，支持 RTX/AMD/Intel）
+# 注意：与 onnxruntime 不兼容，两者只能装一个
+# pip install onnxruntime-directml
+onnxruntime-directml>=1.18.0
+
+# ONNX 模型工具（导出用）
+onnx>=1.12.0
+
+# 图像处理
 numpy
+opencv-python
 Pillow
 
-# Global hotkeys (run terminal as Administrator)
-keyboard
+# 注：快捷键使用 Windows 原生 GetAsyncKeyState（ctypes），无需额外依赖

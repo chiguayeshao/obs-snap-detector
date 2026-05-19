@@ -1,45 +1,61 @@
 """
 capture.py — 屏幕截帧模块
 
-使用 dxcam（封装 DXGI Desktop Duplication API），
-这与 OBS Studio 的 "Display Capture" 后端使用的是同一套 Windows API。
-原理：通过 IDXGIOutputDuplication 在 GPU 层面拷贝帧缓冲，
-无需经过 GDI，延迟极低（<1ms）。
+优先使用 dxcam（DXGI Desktop Duplication，与 OBS 同 API）；
+如果 dxcam 初始化失败，自动回退到 mss（GDI，兼容性更好）。
 """
 
 import numpy as np
-import dxcam
-from config import CAPTURE_REGION, TARGET_FPS
+from config import CAPTURE_REGION, TARGET_FPS, CAPTURE_MONITOR
 
 
 class ScreenCapturer:
     def __init__(self):
-        # dxcam 默认使用 GPU 0，output 0（主显示器）
-        self._camera = dxcam.create(output_color="RGB")
-        self._region = CAPTURE_REGION  # None 或 (left, top, right, bottom)
+        self._region  = CAPTURE_REGION
         self._started = False
+        self._backend = None
+        self._camera  = None
+        self._mss_sct = None
+        self._init_camera()
 
+    # ── 初始化 ────────────────────────────────────────
+    def _init_camera(self):
+        """尝试 dxcam，失败则回退到 mss。"""
+        try:
+            import dxcam
+            self._camera  = dxcam.create(device_idx=CAPTURE_MONITOR, output_color="RGB")
+            self._backend = "dxcam"
+            print("[Capture] 后端: dxcam (DXGI) ✓")
+        except Exception as e:
+            print(f"[Capture] dxcam 初始化失败: {e}")
+            print("[Capture] 回退到 mss (GDI) ...")
+            try:
+                import mss
+                self._mss_sct = mss.mss()
+                self._backend = "mss"
+                print("[Capture] 后端: mss (GDI) ✓")
+            except Exception as e2:
+                raise RuntimeError(
+                    f"所有截帧后端均失败:\n  dxcam: {e}\n  mss: {e2}"
+                )
+
+    # ── 生命周期 ──────────────────────────────────────
     def start(self):
-        """启动连续截帧模式（比单次 grab 延迟更低）"""
         if not self._started:
-            self._camera.start(
-                region=self._region,
-                target_fps=TARGET_FPS,
-                video_mode=True,   # 始终有帧输出，不等待屏幕变化
-            )
+            if self._backend == "dxcam":
+                self._camera.start(
+                    region=self._region,
+                    target_fps=TARGET_FPS,
+                    video_mode=True,
+                )
             self._started = True
-
-    def grab_frame(self) -> np.ndarray | None:
-        """
-        获取最新一帧，返回 RGB numpy array (H, W, 3)。
-        如果当前无新帧则返回 None。
-        """
-        frame = self._camera.get_latest_frame()
-        return frame  # 已经是 RGB ndarray，无需转换
 
     def stop(self):
         if self._started:
-            self._camera.stop()
+            if self._backend == "dxcam":
+                self._camera.stop()
+            elif self._backend == "mss" and self._mss_sct:
+                self._mss_sct.close()
             self._started = False
 
     def __enter__(self):
@@ -48,3 +64,29 @@ class ScreenCapturer:
 
     def __exit__(self, *_):
         self.stop()
+
+    # ── 截帧 ──────────────────────────────────────────
+    def grab_frame(self) -> "np.ndarray | None":
+        """返回最新一帧 RGB numpy array (H, W, 3)，无新帧则返回 None。"""
+        if self._backend == "dxcam":
+            return self._camera.get_latest_frame()
+        elif self._backend == "mss":
+            return self._grab_mss()
+        return None
+
+    def _grab_mss(self) -> "np.ndarray | None":
+        from PIL import Image
+        monitors = self._mss_sct.monitors
+        mon_idx  = CAPTURE_MONITOR + 1
+        monitor  = monitors[mon_idx] if mon_idx < len(monitors) else monitors[1]
+        if self._region:
+            l, t, r, b = self._region
+            monitor = {"left": l, "top": t, "width": r - l, "height": b - t}
+        sct = self._mss_sct.grab(monitor)
+        img = Image.frombytes("RGB", sct.size, sct.bgra, "raw", "BGRX")
+        return np.array(img)
+
+    @property
+    def backend(self) -> str:
+        return self._backend or "none"
+

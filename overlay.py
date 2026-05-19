@@ -1,15 +1,12 @@
 """
 overlay.py — 透明全屏覆盖层
 
-原理：创建一个覆盖全屏的 tkinter 窗口，
-设置 transparentcolor 使背景色完全穿透，
-只有我们画的线条/文字可见，叠加在任何窗口（包括游戏）上方。
-
-窗口属性：
-  - Always-on-top（-topmost True）
-  - 无边框（overrideredirect）
-  - 背景色 = 透明穿透色
-  - 鼠标事件穿透（SetWindowLong WS_EX_TRANSPARENT）
+新增显示元素：
+  - 头部估算框（黄色虚线）
+  - snap 瞄准点红点
+  - 吸附圈（屏幕中心白色虚线圆 + 准星）
+  - 最近目标用不同颜色高亮
+  - FPS 三合一：截帧 / 推理 / 渲染
 """
 
 import tkinter as tk
@@ -19,11 +16,149 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from detector import Detection
 
-# 与背景色相同的颜色 → 完全透明
 _TRANSPARENT_COLOR = "#010101"
 
 
 class Overlay:
+    def __init__(self):
+        self._root = tk.Tk()
+        self._setup_window()
+        self._canvas = tk.Canvas(
+            self._root,
+            bg=_TRANSPARENT_COLOR,
+            highlightthickness=0,
+        )
+        self._canvas.pack(fill=tk.BOTH, expand=True)
+        self._make_click_through()
+        self._root.update_idletasks()
+        self._sw = self._root.winfo_screenwidth()
+        self._sh = self._root.winfo_screenheight()
+
+    def _setup_window(self):
+        r = self._root
+        r.overrideredirect(True)
+        r.attributes("-topmost", True)
+        sw = r.winfo_screenwidth()
+        sh = r.winfo_screenheight()
+        r.geometry(f"{sw}x{sh}+0+0")
+        r.wm_attributes("-transparentcolor", _TRANSPARENT_COLOR)
+        r.configure(bg=_TRANSPARENT_COLOR)
+
+    def _make_click_through(self):
+        """设置 WS_EX_TRANSPARENT 使鼠标点击穿透覆盖层。"""
+        try:
+            self._root.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(self._root.winfo_id())
+            if hwnd == 0:
+                hwnd = self._root.winfo_id()
+            WS_EX_TRANSPARENT = 0x00000020
+            WS_EX_LAYERED     = 0x00080000
+            GWL_EXSTYLE       = -20
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            ctypes.windll.user32.SetWindowLongW(
+                hwnd, GWL_EXSTYLE, style | WS_EX_TRANSPARENT | WS_EX_LAYERED
+            )
+        except Exception as e:
+            print(f"[Overlay] 鼠标穿透设置失败: {e}")
+
+    def update(
+        self,
+        detections: "list[Detection]",
+        fps_cap: float,
+        fps_inf: float,
+        fps_ovl: float,
+        enabled: bool,
+        cap_size: "tuple[int,int] | None" = None,
+    ):
+        from config import (
+            BOX_COLOR, BOX_WIDTH, LABEL_FONT_SIZE,
+            PRIMARY_TARGET_COLOR, HEAD_ZONE_COLOR,
+            SNAP_POINT_COLOR, SNAP_ZONE_COLOR,
+            SNAP_ZONE_RADIUS, SHOW_SNAP_ZONE,
+            FPS_COLOR, FPS_FONT_SIZE,
+        )
+
+        self._canvas.delete("all")
+
+        if not enabled:
+            self._root.update()
+            return
+
+        # ── 坐标缩放：将截帧坐标映射到 overlay 逻辑像素 ──
+        cap_w = cap_size[0] if cap_size else self._sw
+        cap_h = cap_size[1] if cap_size else self._sh
+        rx = self._sw / cap_w
+        ry = self._sh / cap_h
+
+        def sx(x: int) -> int: return int(x * rx)
+        def sy(y: int) -> int: return int(y * ry)
+
+        cx, cy = self._sw // 2, self._sh // 2
+
+        # ── 吸附圈 + 准星 ──────────────────────────────
+        if SHOW_SNAP_ZONE and SNAP_ZONE_RADIUS > 0:
+            r = SNAP_ZONE_RADIUS
+            self._canvas.create_oval(
+                cx - r, cy - r, cx + r, cy + r,
+                outline=SNAP_ZONE_COLOR, width=1, dash=(4, 6),
+            )
+            self._canvas.create_line(cx - 12, cy, cx + 12, cy, fill=SNAP_ZONE_COLOR, width=1)
+            self._canvas.create_line(cx, cy - 12, cx, cy + 12, fill=SNAP_ZONE_COLOR, width=1)
+
+        # ── 逐目标绘制 ─────────────────────────────────
+        for i, det in enumerate(detections):
+            is_primary = (i == 0)
+            color = PRIMARY_TARGET_COLOR if is_primary else BOX_COLOR
+            bw    = BOX_WIDTH + (1 if is_primary else 0)
+
+            self._canvas.create_rectangle(
+                sx(det.x1), sy(det.y1), sx(det.x2), sy(det.y2),
+                outline=color, width=bw,
+            )
+
+            hx1, hy1, hx2, hy2 = det.head_box
+            self._canvas.create_rectangle(
+                sx(hx1), sy(hy1), sx(hx2), sy(hy2),
+                outline=HEAD_ZONE_COLOR, width=1, dash=(3, 3),
+            )
+
+            spx, spy = det.snap_point
+            spx, spy = sx(spx), sy(spy)
+            dot_r    = 3 if is_primary else 2
+            self._canvas.create_oval(
+                spx - dot_r, spy - dot_r, spx + dot_r, spy + dot_r,
+                fill=SNAP_POINT_COLOR, outline=SNAP_POINT_COLOR,
+            )
+
+            dist  = int(det.distance_to_center)
+            label = f"{det.confidence:.0%}  {dist}px"
+            self._canvas.create_text(
+                sx(det.x1) + 4, sy(det.y1) - 2,
+                text=label, fill=color,
+                font=("Consolas", LABEL_FONT_SIZE, "bold"),
+                anchor="sw",
+            )
+
+        # ── FPS 计数器（右上角）─────────────────────────
+        fps_text = (
+            f"Cap:{fps_cap:.0f}  Inf:{fps_inf:.0f}  Ovl:{fps_ovl:.0f}"
+            f"  |  {len(detections)} targets"
+        )
+        self._canvas.create_text(
+            self._sw - 10, 10,
+            text=fps_text, fill=FPS_COLOR,
+            font=("Consolas", FPS_FONT_SIZE, "bold"),
+            anchor="ne",
+        )
+
+        self._root.update()
+
+    def destroy(self):
+        try:
+            self._root.destroy()
+        except Exception:
+            pass
+
     def __init__(self):
         self._root = tk.Tk()
         self._setup_window()

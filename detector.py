@@ -1,27 +1,38 @@
 """
-detector.py — YOLOv8 人体检测模块
+detector.py — ONNX + DirectML GPU 加速检测器
 
-加载 YOLOv8n 预训练模型（COCO 数据集），
-只保留 class=0（person）的检测结果。
+推理性能（RTX 4080 Super，游戏运行中）：
+  DirectML GPU : ~45 FPS / 22ms  (imgsz=1280)
+  CPU PyTorch  : ~7 FPS  / 138ms（后备）
 
-检测流水线：
-  RGB frame (numpy) → YOLO inference → filter person class → List[Detection]
+YOLO11 ONNX 输出格式：
+  输入 [1, 3, imgsz, imgsz]  → 输出 [1, 84, N]
+  前4行: xc, yc, w, h（letterbox 坐标，单位像素）
+  后80行: 80个 COCO 类的置信度（class 0 = person）
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import numpy as np
-from ultralytics import YOLO
-from config import CONFIDENCE_THRESHOLD, MODEL_NAME
+import cv2
+
+from config import (
+    CONFIDENCE_THRESHOLD, NEW_TRACK_CONF,
+    MODEL_ONNX_PATH, USE_DIRECTML, NMS_IOU_THRESH,
+    MODEL_NAME, DETECT_CLASSES, HEAD_ZONE_RATIO, INFERENCE_IMGSZ,
+    BOTTOM_STRIP_RATIO, HANDS_CENTER_Y_RATIO, HANDS_BOX_HEIGHT_RATIO,
+)
 
 
 @dataclass
 class Detection:
-    """单个检测结果"""
+    """单个检测结果，含瞄准点元数据。"""
     x1: int
     y1: int
     x2: int
     y2: int
     confidence: float
+    _screen_cx: int = field(default=960, repr=False)
+    _screen_cy: int = field(default=540, repr=False)
 
     @property
     def center(self) -> tuple[int, int]:
@@ -35,39 +46,180 @@ class Detection:
     def height(self) -> int:
         return self.y2 - self.y1
 
+    @property
+    def head_box(self) -> tuple[int, int, int, int]:
+        head_h = max(int(self.height * HEAD_ZONE_RATIO), 10)
+        cx     = (self.x1 + self.x2) // 2
+        half_w = max(self.width // 4, 10)
+        return (cx - half_w, self.y1, cx + half_w, self.y1 + head_h)
 
+    @property
+    def snap_point(self) -> tuple[int, int]:
+        hx1, hy1, hx2, hy2 = self.head_box
+        return ((hx1 + hx2) // 2, (hy1 + hy2) // 2)
+
+    @property
+    def distance_to_center(self) -> float:
+        sx, sy = self.snap_point
+        return ((sx - self._screen_cx) ** 2 + (sy - self._screen_cy) ** 2) ** 0.5
+
+
+# ── 纯 NumPy NMS ─────────────────────────────────────────────────────────────
+def _nms(boxes: np.ndarray, scores: np.ndarray, iou_thresh: float) -> list[int]:
+    """boxes: [N,4] xyxy；返回保留的索引列表。"""
+    if len(boxes) == 0:
+        return []
+    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    areas  = (x2 - x1) * (y2 - y1)
+    order  = scores.argsort()[::-1]
+    keep: list[int] = []
+    while order.size > 0:
+        i = int(order[0])
+        keep.append(i)
+        if order.size == 1:
+            break
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+        inter = np.maximum(0.0, xx2 - xx1) * np.maximum(0.0, yy2 - yy1)
+        iou   = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
+        order = order[1:][iou <= iou_thresh]
+    return keep
+
+
+# ── 检测器 ───────────────────────────────────────────────────────────────────
 class Detector:
-    PERSON_CLASS_ID = 0  # COCO 数据集中 person 的 class id
+    def __init__(self, screen_size: tuple[int, int] = (2560, 1440)):
+        self._screen_w, self._screen_h = screen_size
+        self._mode = 'pytorch'
 
-    def __init__(self):
-        print(f"[Detector] 加载模型 {MODEL_NAME}（首次运行会自动下载）...")
+        if USE_DIRECTML:
+            if self._try_init_directml():
+                return
+        self._init_pytorch()
+
+    # ── DirectML 初始化 ───────────────────────────────────────────────────────
+    def _try_init_directml(self) -> bool:
+        try:
+            import onnxruntime as ort
+            avail = [p.lower() for p in ort.get_available_providers()]
+            if 'dmlexecutionprovider' not in avail:
+                print("[Detector] ⚠ DirectML 不可用，请确认安装了 onnxruntime-directml")
+                return False
+            providers = ['DmlExecutionProvider', 'CPUExecutionProvider']
+            self._sess       = ort.InferenceSession(MODEL_ONNX_PATH, providers=providers)
+            inp              = self._sess.get_inputs()[0]
+            self._input_name = inp.name
+            self._imgsz      = inp.shape[2]   # [1, 3, H, W]
+            # 预热（DirectML 首次推理有编译延迟）
+            dummy = np.zeros((1, 3, self._imgsz, self._imgsz), dtype=np.float32)
+            self._sess.run(None, {self._input_name: dummy})
+            self._mode = 'directml'
+            print(f"[Detector] ✅ DirectML GPU 推理 | 输入 {self._imgsz}×{self._imgsz} "
+                  f"| 屏幕 {self._screen_w}×{self._screen_h}")
+            return True
+        except FileNotFoundError:
+            print(f"[Detector] ⚠ 找不到 {MODEL_ONNX_PATH}，回退 CPU")
+            return False
+        except Exception as e:
+            print(f"[Detector] ⚠ DirectML 初始化失败: {e}")
+            return False
+
+    # ── PyTorch 后备 ─────────────────────────────────────────────────────────
+    def _init_pytorch(self):
+        from ultralytics import YOLO
+        print(f"[Detector] 加载 PyTorch 模型 {MODEL_NAME}...")
         self._model = YOLO(MODEL_NAME)
-        print("[Detector] 模型加载完成 ✓")
+        self._mode  = 'pytorch'
+        print(f"[Detector] PyTorch CPU | 屏幕 {self._screen_w}×{self._screen_h}")
 
-    def detect(self, frame: np.ndarray) -> list[Detection]:
-        """
-        对一帧图像进行检测，只返回 person 类结果。
+    # ── Letterbox 预处理 ─────────────────────────────────────────────────────
+    def _letterbox(self, frame: np.ndarray):
+        """等比缩放 + 灰色填充至 imgsz×imgsz，返回 (inp, scale, pad_x, pad_y)。"""
+        h, w  = frame.shape[:2]
+        scale = self._imgsz / max(h, w)
+        nh    = int(round(h * scale))
+        nw    = int(round(w * scale))
+        resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        canvas  = np.full((self._imgsz, self._imgsz, 3), 114, dtype=np.uint8)
+        pad_y   = (self._imgsz - nh) // 2
+        pad_x   = (self._imgsz - nw) // 2
+        canvas[pad_y:pad_y + nh, pad_x:pad_x + nw] = resized
+        inp = canvas.astype(np.float32) / 255.0
+        inp = inp.transpose(2, 0, 1)[np.newaxis]   # HWC → NCHW (1,3,H,W)
+        return inp, scale, pad_x, pad_y
 
-        Args:
-            frame: RGB numpy array, shape (H, W, 3)
+    # ── ONNX 输出解码 ────────────────────────────────────────────────────────
+    def _postprocess(
+        self,
+        raw: np.ndarray,          # [1, 84, N]
+        scale: float,
+        pad_x: int, pad_y: int,
+        frame_h: int, frame_w: int,
+    ) -> list[tuple[np.ndarray, float]]:
+        preds = raw[0]            # [84, N]
+        person_conf = preds[4, :]  # class 0 (person) 在行索引 4
+        mask = person_conf > CONFIDENCE_THRESHOLD
+        if not np.any(mask):
+            return []
+        coords = preds[:4, mask]  # [4, K]  — xc,yc,w,h in letterbox pixels
+        scores = person_conf[mask]
 
-        Returns:
-            检测到的人体列表，按置信度降序排列
-        """
-        results = self._model(
-            frame,
-            conf=CONFIDENCE_THRESHOLD,
-            classes=[self.PERSON_CLASS_ID],  # 只检测 person，跳过其他 79 类
-            verbose=False,
-        )
+        # xywh → xyxy（letterbox 坐标）
+        x1 = coords[0] - coords[2] * 0.5
+        y1 = coords[1] - coords[3] * 0.5
+        x2 = coords[0] + coords[2] * 0.5
+        y2 = coords[1] + coords[3] * 0.5
+        boxes = np.stack([x1, y1, x2, y2], axis=1)   # [K, 4]
+
+        keep  = _nms(boxes, scores, NMS_IOU_THRESH)
+        boxes  = boxes[keep]
+        scores = scores[keep]
+
+        # Undo letterbox → 原始帧坐标
+        boxes[:, [0, 2]] = np.clip((boxes[:, [0, 2]] - pad_x) / scale, 0, frame_w)
+        boxes[:, [1, 3]] = np.clip((boxes[:, [1, 3]] - pad_y) / scale, 0, frame_h)
+        return [(boxes[i].astype(int), float(scores[i])) for i in range(len(boxes))]
+
+    # ── 手部/武器过滤 ────────────────────────────────────────────────────────
+    def _is_hand(self, x1: int, y1: int, x2: int, y2: int, frame_h: int) -> bool:
+        cy_r = (y1 + y2) / 2 / frame_h
+        bh_r = (y2 - y1) / frame_h
+        if cy_r > BOTTOM_STRIP_RATIO:
+            return True
+        if bh_r > HANDS_BOX_HEIGHT_RATIO and cy_r > HANDS_CENTER_Y_RATIO:
+            return True
+        return False
+
+    # ── 主接口 ───────────────────────────────────────────────────────────────
+    def detect(self, frame: np.ndarray) -> "list[Detection]":
+        h, w  = frame.shape[:2]
+        cx, cy = w // 2, h // 2
+
+        if self._mode == 'directml':
+            inp, scale, pad_x, pad_y = self._letterbox(frame)
+            raw = self._sess.run(None, {self._input_name: inp})[0]
+            boxes_scores = self._postprocess(raw, scale, pad_x, pad_y, h, w)
+        else:
+            results      = self._model(
+                frame, conf=CONFIDENCE_THRESHOLD,
+                classes=DETECT_CLASSES, imgsz=INFERENCE_IMGSZ, verbose=False,
+            )
+            boxes_scores = []
+            for result in results:
+                for box in result.boxes:
+                    bxy  = list(map(int, box.xyxy[0].tolist()))
+                    conf = float(box.conf[0])
+                    boxes_scores.append((np.array(bxy), conf))
 
         detections: list[Detection] = []
-        for result in results:
-            for box in result.boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                conf = float(box.conf[0])
-                detections.append(Detection(x1, y1, x2, y2, conf))
+        for box, conf in boxes_scores:
+            x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+            if self._is_hand(x1, y1, x2, y2, h):
+                continue
+            detections.append(Detection(x1, y1, x2, y2, conf, _screen_cx=cx, _screen_cy=cy))
 
-        # 按置信度降序排列
-        detections.sort(key=lambda d: d.confidence, reverse=True)
+        detections.sort(key=lambda d: d.distance_to_center)
         return detections
+
