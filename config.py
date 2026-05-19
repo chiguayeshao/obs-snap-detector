@@ -19,12 +19,16 @@ MODEL_ONNX_PATH       = "yolo11s_1280.onnx"  # GPU 推理模型（imgsz=1280）
 USE_DIRECTML          = True   # True=GPU DirectML；False=CPU PyTorch
 NMS_IOU_THRESH        = 0.45   # ONNX 后处理 NMS IoU 阈值
 
-# ── 跟踪器参数 ────────────────────────────────────────
-TRACKER_IOU_THRESH    = 0.25   # IoU 低于此值视为不同目标
-TRACKER_EMA_ALPHA     = 0.25   # 坐标平滑基础系数（自适应会动态调整）
-TRACKER_TTL           = 10     # 未匹配后保持显示推理帧数（10帧@50FPS≈0.2s）
-TRACKER_MIN_AGE       = 2      # 新目标需连续出现几帧才显示
-JUMP_SCALE            = 150.0  # 自适应 EMA 跳变参考距离（像素），越小越激进
+# ── 跟踪器参数（ByteTrack + Kalman）─────────────────
+TRACKER_IOU_THRESH    = 0.25   # IoU 匹配阈值（低于此值不匹配）
+TRACKER_HIGH_CONF     = 0.25   # 第一阶段匹配用高置信度阈值
+TRACKER_MAX_AGE       = 3      # CONFIRMED 轨迹最多允许连续未检测帧数（3帧@45FPS≈67ms，减少残留）
+TRACKER_MIN_HITS      = 2      # TENTATIVE → CONFIRMED 所需连续命中帧数（防单帧误检闪烁）
+# 以下保留兼容旧代码
+TRACKER_EMA_ALPHA     = 0.25
+TRACKER_TTL           = 10
+TRACKER_MIN_AGE       = 2
+JUMP_SCALE            = 150.0
 
 # ── 自身手部/武器过滤 ─────────────────────────────────
 # FPS 游戏中自己的手/武器永远在屏幕下方且面积很大，需过滤掉

@@ -21,12 +21,10 @@ import numpy as np
 from capture  import ScreenCapturer
 from detector import Detector
 from overlay  import Overlay
-from tracker  import Tracker
+from tracker  import ByteTracker
 from config   import (
     TOGGLE_KEY, EXIT_KEY, SNAPSHOT_KEY,
     TARGET_FPS, INFERENCE_QUEUE_SIZE, DETECTION_QUEUE_SIZE,
-    TRACKER_IOU_THRESH, TRACKER_EMA_ALPHA, TRACKER_TTL, TRACKER_MIN_AGE,
-    NEW_TRACK_CONF, JUMP_SCALE,
 )
 
 # ── 按键检测（GetAsyncKeyState 轮询，无全局钩子）────
@@ -122,7 +120,7 @@ def main():
     global _request_snapshot
 
     print("=" * 55)
-    print("  OBS Snap Detector  |  学习用途  v3.0 GPU")
+    print("  OBS Snap Detector  |  学习用途  v4.0 ByteTrack")
     print("=" * 55)
 
     capturer = ScreenCapturer()
@@ -150,13 +148,7 @@ def main():
     fps             = {"cap": 0.0, "inf": 0.0, "ovl": 0.0}
     ovl_count       = 0
     fps_timer       = time.perf_counter()
-    tracker = Tracker(
-        iou_thresh=TRACKER_IOU_THRESH,
-        ema_alpha=TRACKER_EMA_ALPHA,
-        ttl=TRACKER_TTL,
-        min_age=TRACKER_MIN_AGE,
-        new_track_conf=NEW_TRACK_CONF,
-    )
+    tracker = ByteTracker()
 
     with capturer:
         for thr in [

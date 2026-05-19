@@ -31,6 +31,7 @@ class Detection:
     x2: int
     y2: int
     confidence: float
+    track_id: int = -1                              # 由 ByteTracker 设置，用于覆盖层持久化
     _screen_cx: int = field(default=960, repr=False)
     _screen_cy: int = field(default=540, repr=False)
 
