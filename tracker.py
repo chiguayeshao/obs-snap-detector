@@ -62,8 +62,9 @@ class KalmanBoxFilter:
         # Process noise: allow large velocity changes (fast acceleration in-game)
         self.Q = np.diag([1., 1., 2., 2., 20., 20.]).astype(np.float64)
 
-        # Measurement noise: YOLO boxes vary ~5px in position, ~10px in size
-        self.R = np.diag([4., 4., 9., 9.]).astype(np.float64)
+        # Measurement noise: increased to smooth YOLO box jitter (was [4,4,9,9])
+        # Higher R → Kalman trusts prediction more → less per-frame shimmer
+        self.R = np.diag([16., 16., 36., 36.]).astype(np.float64)
 
     def predict(self) -> tuple:
         """Advance state by one frame using constant-velocity model."""
@@ -116,6 +117,9 @@ class _Track:
         self.miss_streak = 0   # consecutive missed frames
         self._box        = (float(det.x1), float(det.y1),
                             float(det.x2), float(det.y2))
+        # With MIN_HITS=1 the very first detection immediately confirms the track
+        if self.hits >= TRACKER_MIN_HITS:
+            self.state = _CONFIRMED
 
     def predict(self):
         self._box = self.kf.predict()
@@ -127,8 +131,10 @@ class _Track:
         w  = float(det.x2 - det.x1)
         h  = float(det.y2 - det.y1)
         self._box = self.kf.update(cx, cy, w, h)
-        # Smooth confidence to avoid label jitter
-        self.conf        = 0.65 * det.confidence + 0.35 * self.conf
+        # Asymmetric EMA: confidence rises quickly, decays slowly
+        # Prevents the "label keeps decreasing" visual artifact
+        alpha = 0.7 if det.confidence >= self.conf else 0.2
+        self.conf        = alpha * det.confidence + (1.0 - alpha) * self.conf
         self.hits       += 1
         self.miss_streak = 0
         if self.state == _TENTATIVE and self.hits >= TRACKER_MIN_HITS:

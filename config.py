@@ -2,6 +2,7 @@
 config.py — 所有可调参数
 修改这里的值来定制检测行为，无需改其他文件。
 """
+# 注意：快捷键已更新为 F1=开关  F2=退出  F10=截图
 
 # ── 截帧 ──────────────────────────────────────────────
 CAPTURE_REGION  = None     # None = 全屏；或 (left, top, right, bottom)
@@ -22,8 +23,8 @@ NMS_IOU_THRESH        = 0.45   # ONNX 后处理 NMS IoU 阈值
 # ── 跟踪器参数（ByteTrack + Kalman）─────────────────
 TRACKER_IOU_THRESH    = 0.25   # IoU 匹配阈值（低于此值不匹配）
 TRACKER_HIGH_CONF     = 0.25   # 第一阶段匹配用高置信度阈值
-TRACKER_MAX_AGE       = 3      # CONFIRMED 轨迹最多允许连续未检测帧数（3帧@45FPS≈67ms，减少残留）
-TRACKER_MIN_HITS      = 2      # TENTATIVE → CONFIRMED 所需连续命中帧数（防单帧误检闪烁）
+TRACKER_MAX_AGE       = 5      # CONFIRMED 轨迹最多允许连续未检测帧数（5帧@60FPS≈83ms）
+TRACKER_MIN_HITS      = 1      # =1: 首次检测到即显示（无延迟），防单帧误检靠 NEW_TRACK_CONF
 # 以下保留兼容旧代码
 TRACKER_EMA_ALPHA     = 0.25
 TRACKER_TTL           = 10
@@ -40,6 +41,11 @@ HANDS_BOX_HEIGHT_RATIO = 0.20 # 框高 / 画面高 > 此值 且中心偏下 → 
 HEAD_ZONE_RATIO  = 0.20   # 边界框顶部 20% = 头部区域
 SNAP_ZONE_RADIUS = 300    # 屏幕中心吸附圈半径（像素），0 = 不显示
 SHOW_SNAP_ZONE   = True
+
+# ── 覆盖层稳定参数 ───────────────────────────────────
+OVERLAY_MAX_POOL_SIZE  = 15    # canvas 元素池上限，防长时间运行后画布积累太多项目拖慢渲染
+PRIMARY_SWITCH_MARGIN  = 80    # 主目标切换迟滞（像素）：新目标需比当前主目标近80px才切换，防颜色闪烁
+BOX_SNAP_PX            = 2     # 坐标像素捕捉阈值：变化<2px 不更新画布，消除微抖视觉噪声
 
 # ── 覆盖层颜色 ────────────────────────────────────────
 BOX_COLOR            = "#00FF41"   # 普通目标框（黑客绿）
@@ -58,7 +64,7 @@ INFERENCE_QUEUE_SIZE = 2
 DETECTION_QUEUE_SIZE = 2
 
 # ── 快捷键 ────────────────────────────────────────────
-TOGGLE_KEY   = "f9"    # 开/关覆盖层
-EXIT_KEY     = "esc"   # 退出程序
+TOGGLE_KEY   = "f1"    # 开/关覆盖层（游戏中按 F1）
+EXIT_KEY     = "f2"    # 退出程序（游戏中按 F2）
 SNAPSHOT_KEY = "f10"   # 保存带检测框的截图
 

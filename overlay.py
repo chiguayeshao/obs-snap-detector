@@ -8,7 +8,12 @@ Anti-flicker principle:
   When a track disappears, its items are hidden with state='hidden' (not deleted).
   Items are reused from a free pool when a new track appears.
 
-This eliminates the blank-frame artifact caused by delete-then-redraw.
+Three-layer flicker elimination:
+  1. Pixel snap   — skip canvas.coords() update if movement < BOX_SNAP_PX pixels
+  2. Primary hysteresis — only switch "nearest target" colour if new target is
+                          PRIMARY_SWITCH_MARGIN px closer (prevents rapid red/green swap)
+  3. Pool cap     — limit free pool to OVERLAY_MAX_POOL_SIZE to prevent canvas
+                    item accumulation that degrades FPS over time
 """
 
 import tkinter as tk
@@ -41,6 +46,12 @@ class Overlay:
 
         # Reusable pool of hidden item groups (avoids create_* on every new track)
         self._free_pool: list[dict[str, int]] = []
+
+        # Primary target hysteresis — only switch when new target is clearly closer
+        self._primary_tid: int = -1
+
+        # Last drawn box coords per track — pixel-snap avoids canvas update on tiny movement
+        self._last_box: dict[int, tuple[int, int, int, int]] = {}
 
         # Static items — created once, updated in-place
         self._init_static_items()
@@ -96,7 +107,7 @@ class Overlay:
                 hwnd, GWL_EXSTYLE, style | WS_EX_TRANSPARENT | WS_EX_LAYERED,
             )
         except Exception as e:
-            print(f"[Overlay] 鼠标穿透设置失败: {e}")
+            print(f"[Overlay] click-through setup failed: {e}")
 
     # ── Canvas item pool ──────────────────────────────────────────────────────
 
@@ -125,11 +136,17 @@ class Overlay:
         return self._new_item_group()
 
     def _release_item_group(self, items: dict[str, int]):
-        """Return an item group to the free pool (hidden)."""
+        """Return an item group to the free pool (hidden). Cap pool to avoid canvas bloat."""
+        from config import OVERLAY_MAX_POOL_SIZE
         cv = self._canvas
-        for item_id in items.values():
-            cv.itemconfig(item_id, state='hidden')
-        self._free_pool.append(items)
+        if len(self._free_pool) >= OVERLAY_MAX_POOL_SIZE:
+            # Pool full — delete canvas items to prevent accumulation over long sessions
+            for item_id in items.values():
+                cv.delete(item_id)
+        else:
+            for item_id in items.values():
+                cv.itemconfig(item_id, state='hidden')
+            self._free_pool.append(items)
 
     # ── Main update ───────────────────────────────────────────────────────────
 
@@ -147,6 +164,7 @@ class Overlay:
             PRIMARY_TARGET_COLOR, HEAD_ZONE_COLOR,
             SNAP_POINT_COLOR, SNAP_ZONE_COLOR,
             SNAP_ZONE_RADIUS, SHOW_SNAP_ZONE, FPS_COLOR,
+            PRIMARY_SWITCH_MARGIN, BOX_SNAP_PX,
         )
 
         cv = self._canvas
@@ -159,6 +177,8 @@ class Overlay:
             cv.itemconfig(self._fps_item,    state='hidden')
             for tid in list(self._track_items):
                 self._release_item_group(self._track_items.pop(tid))
+                self._last_box.pop(tid, None)
+            self._primary_tid = -1
             self._root.update()
             return
 
@@ -197,10 +217,30 @@ class Overlay:
         active_ids = {d.track_id for d in detections}
         for tid in [k for k in self._track_items if k not in active_ids]:
             self._release_item_group(self._track_items.pop(tid))
+            self._last_box.pop(tid, None)
+
+        # ── Primary target hysteresis ─────────────────────────────────────────
+        # detections are pre-sorted nearest-first; only switch primary when the
+        # new nearest target is significantly closer than the current primary
+        if detections:
+            nearest = detections[0]
+            if self._primary_tid not in active_ids:
+                # Current primary gone — switch immediately
+                self._primary_tid = nearest.track_id
+            else:
+                cur_primary_det = next(
+                    (d for d in detections if d.track_id == self._primary_tid), None
+                )
+                if (cur_primary_det is None or
+                        nearest.distance_to_center
+                        < cur_primary_det.distance_to_center - PRIMARY_SWITCH_MARGIN):
+                    self._primary_tid = nearest.track_id
+        else:
+            self._primary_tid = -1
 
         # ── Update / create items for active tracks ───────────────────────────
         for i, det in enumerate(detections):
-            is_primary = (i == 0)
+            is_primary = (det.track_id == self._primary_tid)
             color = PRIMARY_TARGET_COLOR if is_primary else BOX_COLOR
             bw    = BOX_WIDTH + (1 if is_primary else 0)
             dot_r = 4 if is_primary else 2
@@ -210,9 +250,17 @@ class Overlay:
                 self._track_items[det.track_id] = self._acquire_item_group()
             items = self._track_items[det.track_id]
 
-            # Body box
-            cv.coords(items['box'], sx(det.x1), sy(det.y1),
-                      sx(det.x2), sy(det.y2))
+            # ── Body box (pixel-snap: skip update if movement < BOX_SNAP_PX) ──
+            bx1, by1 = sx(det.x1), sy(det.y1)
+            bx2, by2 = sx(det.x2), sy(det.y2)
+            last = self._last_box.get(det.track_id)
+            if (last is None
+                    or abs(bx1 - last[0]) > BOX_SNAP_PX
+                    or abs(by1 - last[1]) > BOX_SNAP_PX
+                    or abs(bx2 - last[2]) > BOX_SNAP_PX
+                    or abs(by2 - last[3]) > BOX_SNAP_PX):
+                cv.coords(items['box'], bx1, by1, bx2, by2)
+                self._last_box[det.track_id] = (bx1, by1, bx2, by2)
             cv.itemconfig(items['box'], outline=color, width=bw, state='normal')
 
             # Head zone box
@@ -230,9 +278,9 @@ class Overlay:
                           fill=SNAP_POINT_COLOR, outline=SNAP_POINT_COLOR,
                           state='normal')
 
-            # Label
-            label = f"{det.confidence:.0%}  {int(det.distance_to_center)}px"
-            cv.coords(items['label'], sx(det.x1) + 4, sy(det.y1) - 2)
+            # Label — show target index + stable confidence (asymmetric EMA prevents decay)
+            label = f"#{i+1}  {det.confidence:.0%}  {int(det.distance_to_center)}px"
+            cv.coords(items['label'], bx1 + 4, by1 - 2)
             cv.itemconfig(items['label'], text=label, fill=color, state='normal')
 
         self._root.update()
@@ -242,3 +290,4 @@ class Overlay:
             self._root.destroy()
         except Exception:
             pass
+

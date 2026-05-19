@@ -7,9 +7,9 @@ main.py — 多线程流水线主循环
   Main Thread     更新覆盖层 + tkinter 事件
 
 快捷键：
-  F9  — 开/关覆盖层
+  F1  — 开/关覆盖层
+  F2  — 退出程序
   F10 — 保存带检测框的截图（snapshot_YYYYMMDD_HHMMSS.png）
-  ESC — 退出
 """
 
 import time
