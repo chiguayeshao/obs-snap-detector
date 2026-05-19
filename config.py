@@ -23,7 +23,7 @@ NMS_IOU_THRESH        = 0.45   # ONNX 后处理 NMS IoU 阈值
 # ── 跟踪器参数（ByteTrack + Kalman）─────────────────
 TRACKER_IOU_THRESH    = 0.25   # IoU 匹配阈值（低于此值不匹配）
 TRACKER_HIGH_CONF     = 0.25   # 第一阶段匹配用高置信度阈值
-TRACKER_MAX_AGE       = 5      # CONFIRMED 轨迹最多允许连续未检测帧数（5帧@60FPS≈83ms）
+TRACKER_MAX_AGE       = 2      # CONFIRMED 轨迹最多允许连续未检测帧数（2帧@60FPS≈33ms，快速清除残留）
 TRACKER_MIN_HITS      = 1      # =1: 首次检测到即显示（无延迟），防单帧误检靠 NEW_TRACK_CONF
 # 以下保留兼容旧代码
 TRACKER_EMA_ALPHA     = 0.25

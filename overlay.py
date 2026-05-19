@@ -50,8 +50,14 @@ class Overlay:
         # Primary target hysteresis — only switch when new target is clearly closer
         self._primary_tid: int = -1
 
+        # Track previous primary to detect color-change frames (avoid redundant itemconfig)
+        self._prev_primary_tid: int = -1
+
         # Last drawn box coords per track — pixel-snap avoids canvas update on tiny movement
         self._last_box: dict[int, tuple[int, int, int, int]] = {}
+
+        # Last drawn label text — skip itemconfig if label hasn't changed
+        self._last_label: dict[int, str] = {}
 
         # Static items — created once, updated in-place
         self._init_static_items()
@@ -178,7 +184,9 @@ class Overlay:
             for tid in list(self._track_items):
                 self._release_item_group(self._track_items.pop(tid))
                 self._last_box.pop(tid, None)
+                self._last_label.pop(tid, None)
             self._primary_tid = -1
+            self._prev_primary_tid = -1
             self._root.update()
             return
 
@@ -218,71 +226,85 @@ class Overlay:
         for tid in [k for k in self._track_items if k not in active_ids]:
             self._release_item_group(self._track_items.pop(tid))
             self._last_box.pop(tid, None)
+            self._last_label.pop(tid, None)
 
         # ── Primary target hysteresis ─────────────────────────────────────────
-        # detections are pre-sorted nearest-first; only switch primary when the
-        # new nearest target is significantly closer than the current primary
+        prev_primary = self._prev_primary_tid
         if detections:
             nearest = detections[0]
             if self._primary_tid not in active_ids:
-                # Current primary gone — switch immediately
                 self._primary_tid = nearest.track_id
             else:
-                cur_primary_det = next(
-                    (d for d in detections if d.track_id == self._primary_tid), None
-                )
-                if (cur_primary_det is None or
+                cur = next((d for d in detections if d.track_id == self._primary_tid), None)
+                if (cur is None or
                         nearest.distance_to_center
-                        < cur_primary_det.distance_to_center - PRIMARY_SWITCH_MARGIN):
+                        < cur.distance_to_center - PRIMARY_SWITCH_MARGIN):
                     self._primary_tid = nearest.track_id
         else:
             self._primary_tid = -1
 
         # ── Update / create items for active tracks ───────────────────────────
-        for i, det in enumerate(detections):
+        for det in detections:
             is_primary = (det.track_id == self._primary_tid)
-            color = PRIMARY_TARGET_COLOR if is_primary else BOX_COLOR
-            bw    = BOX_WIDTH + (1 if is_primary else 0)
-            dot_r = 4 if is_primary else 2
+            color      = PRIMARY_TARGET_COLOR if is_primary else BOX_COLOR
+            bw         = BOX_WIDTH + (1 if is_primary else 0)
+            dot_r      = 4 if is_primary else 2
 
-            # Acquire item group for this track
-            if det.track_id not in self._track_items:
+            is_new = det.track_id not in self._track_items
+            if is_new:
                 self._track_items[det.track_id] = self._acquire_item_group()
             items = self._track_items[det.track_id]
 
-            # ── Body box (pixel-snap: skip update if movement < BOX_SNAP_PX) ──
+            # ── Pixel snap: skip coord updates for tiny movement ──────────────
             bx1, by1 = sx(det.x1), sy(det.y1)
             bx2, by2 = sx(det.x2), sy(det.y2)
             last = self._last_box.get(det.track_id)
-            if (last is None
-                    or abs(bx1 - last[0]) > BOX_SNAP_PX
-                    or abs(by1 - last[1]) > BOX_SNAP_PX
-                    or abs(bx2 - last[2]) > BOX_SNAP_PX
-                    or abs(by2 - last[3]) > BOX_SNAP_PX):
-                cv.coords(items['box'], bx1, by1, bx2, by2)
+            coords_moved = (
+                last is None
+                or abs(bx1 - last[0]) > BOX_SNAP_PX
+                or abs(by1 - last[1]) > BOX_SNAP_PX
+                or abs(bx2 - last[2]) > BOX_SNAP_PX
+                or abs(by2 - last[3]) > BOX_SNAP_PX
+            )
+            if coords_moved:
+                # Update ALL coord-dependent items together (box, head, dot, label)
+                cv.coords(items['box'],  bx1, by1, bx2, by2)
+                hx1, hy1, hx2, hy2 = det.head_box
+                cv.coords(items['head'], sx(hx1), sy(hy1), sx(hx2), sy(hy2))
+                spx, spy = sx(det.snap_point[0]), sy(det.snap_point[1])
+                cv.coords(items['dot'],
+                          spx - dot_r, spy - dot_r,
+                          spx + dot_r, spy + dot_r)
+                cv.coords(items['label'], bx1 + 4, by1 - 2)
                 self._last_box[det.track_id] = (bx1, by1, bx2, by2)
-            cv.itemconfig(items['box'], outline=color, width=bw, state='normal')
 
-            # Head zone box
-            hx1, hy1, hx2, hy2 = det.head_box
-            cv.coords(items['head'], sx(hx1), sy(hy1), sx(hx2), sy(hy2))
-            cv.itemconfig(items['head'],
-                          outline=HEAD_ZONE_COLOR, state='normal')
+            # ── Color/outline: only update when primary status changes ─────────
+            primary_changed = (
+                (det.track_id == self._primary_tid) !=
+                (det.track_id == prev_primary)
+            )
+            if is_new or primary_changed:
+                cv.itemconfig(items['box'],  outline=color, width=bw, state='normal')
+                cv.itemconfig(items['head'], outline=HEAD_ZONE_COLOR, state='normal')
+                cv.itemconfig(items['dot'],  fill=SNAP_POINT_COLOR,
+                              outline=SNAP_POINT_COLOR, state='normal')
 
-            # Snap dot
-            spx, spy = sx(det.snap_point[0]), sy(det.snap_point[1])
-            cv.coords(items['dot'],
-                      spx - dot_r, spy - dot_r,
-                      spx + dot_r, spy + dot_r)
-            cv.itemconfig(items['dot'],
-                          fill=SNAP_POINT_COLOR, outline=SNAP_POINT_COLOR,
-                          state='normal')
+            # ── Label: rounded values + cache to skip unchanged text ──────────
+            # Round confidence to nearest 5%, distance to nearest 10px
+            # → label changes only when crossing threshold, not every frame
+            conf_r = int(round(det.confidence / 0.05) * 5)
+            dist_r = int(round(det.distance_to_center / 10) * 10)
+            if is_primary:
+                label = f"{conf_r}%  {dist_r}px"
+            else:
+                label = f"{dist_r}px"
 
-            # Label — show target index + stable confidence (asymmetric EMA prevents decay)
-            label = f"#{i+1}  {det.confidence:.0%}  {int(det.distance_to_center)}px"
-            cv.coords(items['label'], bx1 + 4, by1 - 2)
-            cv.itemconfig(items['label'], text=label, fill=color, state='normal')
+            label_changed = label != self._last_label.get(det.track_id)
+            if is_new or label_changed or primary_changed:
+                cv.itemconfig(items['label'], text=label, fill=color, state='normal')
+                self._last_label[det.track_id] = label
 
+        self._prev_primary_tid = self._primary_tid
         self._root.update()
 
     def destroy(self):
