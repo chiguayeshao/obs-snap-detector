@@ -20,6 +20,7 @@ from config import (
     MODEL_ONNX_PATH, USE_DIRECTML, NMS_IOU_THRESH,
     MODEL_NAME, DETECT_CLASSES, HEAD_ZONE_RATIO, INFERENCE_IMGSZ,
     BOTTOM_STRIP_RATIO, HANDS_CENTER_Y_RATIO, HANDS_BOX_HEIGHT_RATIO,
+    HANDS_BOTTOM_EDGE_RATIO, HANDS_WIDE_RATIO,
 )
 
 
@@ -262,9 +263,20 @@ class Detector:
     def _is_hand(self, x1: int, y1: int, x2: int, y2: int, frame_h: int) -> bool:
         cy_r = (y1 + y2) / 2 / frame_h
         bh_r = (y2 - y1) / frame_h
+        bw   = x2 - x1
+        bh   = y2 - y1
+        y2_r = y2 / frame_h
+        # Rule 1: center is in absolute bottom strip
         if cy_r > BOTTOM_STRIP_RATIO:
             return True
+        # Rule 2: box height + center low (original combined filter, now less strict threshold)
         if bh_r > HANDS_BOX_HEIGHT_RATIO and cy_r > HANDS_CENTER_Y_RATIO:
+            return True
+        # Rule 3: bottom edge of bbox anchored to screen bottom → always player's hands/feet area
+        if y2_r > HANDS_BOTTOM_EDGE_RATIO:
+            return True
+        # Rule 4: wide (landscape) detection in lower screen half → horizontal arm/weapon
+        if bh > 0 and bw / bh > HANDS_WIDE_RATIO and cy_r > 0.65:
             return True
         return False
 
