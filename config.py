@@ -7,22 +7,26 @@ config.py — 所有可调参数
 # ── 截帧 ──────────────────────────────────────────────
 CAPTURE_REGION  = None     # None = 全屏；或 (left, top, right, bottom)
 CAPTURE_MONITOR = 0        # 显示器索引：0 = 主屏幕
+CAPTURE_CROP    = 1920     # 中心裁剪尺寸（像素，正方形）：4K下取中心1920×1920，0=不裁剪
+                           # 作用：减少无关区域，降低推理量；与FP16+imgsz=640配合可达100fps+
 
 # ── AI 检测 ───────────────────────────────────────────
-CONFIDENCE_THRESHOLD  = 0.04   # 绝对过滤阈值：4%兼顾远目标检测（低置信检测进Stage2更新现有轨迹，不创建新轨迹）
-NEW_TRACK_CONF        = 0.06   # 创建新轨迹最低置信度（6%：过滤环境杂物误检，避免假目标框）
+CONFIDENCE_THRESHOLD  = 0.10   # 硬过滤：10%（参考sunone track_low_thresh=0.10）
+                                # 低于此值直接丢弃，不进跟踪器，消除环境噪声假检测
+NEW_TRACK_CONF        = 0.20   # 创建新轨迹最低置信度（参考sunone new_track_thresh=0.25）
+                                # 低于此值的检测只能更新已有轨迹(Stage2)，不能创建新轨迹
 MODEL_NAME            = "yolo11m.pt"   # CPU 后备模型
-INFERENCE_IMGSZ       = 960    # 2K/960 最佳平衡；640最快（CPU 模式）
+INFERENCE_IMGSZ       = 640    # 与中心裁剪1920配合：scale=1/3，目标20px，FP16下约100fps
 DETECT_CLASSES        = [0]    # COCO: 0=person
 
 # ── GPU 加速（DirectML + ONNX）────────────────────────
-MODEL_ONNX_PATH       = "yolo11m.onnx"  # GPU 推理模型（yolo11m imgsz=960，比yolo11s更好地检测远处T3/T4目标）
+MODEL_ONNX_PATH       = "yolo11m_1280.onnx"  # GPU 推理模型（yolo11m imgsz=1280，4K分辨率优化，~45fps）
 USE_DIRECTML          = True   # True=GPU DirectML；False=CPU PyTorch
 NMS_IOU_THRESH        = 0.70   # ONNX 后处理 NMS IoU 阈值（提高至0.70允许并排/叠放目标共存）
 
 # ── 跟踪器参数（ByteTrack + Kalman）─────────────────
 TRACKER_IOU_THRESH    = 0.20   # IoU 主匹配阈值（提高至0.20：阻止大框抢邻近目标检测(IoU≈0.14)，保留躯干-全身匹配(IoU≈0.43)）
-TRACKER_HIGH_CONF     = 0.06   # 高置信分界：6%以下检测进Stage2（只更新现有轨迹），6%以上进Stage1+1b（可创建新轨迹）
+TRACKER_HIGH_CONF     = 0.20   # 高置信分界：20%以下检测进Stage2（只更新现有轨迹），20%以上进Stage1（可创建新轨迹）
 TRACKER_MAX_AGE       = 3      # CONFIRMED 轨迹最多允许连续未检测帧数（3帧@42FPS≈70ms：视角转开时边框立即消失，避免残影≈1秒问题）
 TRACKER_MIN_HITS      = 2      # =2: 需要连续2帧检测才显示边框，过滤单帧噪声（防止T3/T4低置信单帧检测产生的扫描闪烁效果）
 TRACKER_CENTER_DIST_FALLBACK = 160.0  # snap-point Stage 1b 回退匹配阈值（像素）：头部snap差≈50px，不同目标≥168px

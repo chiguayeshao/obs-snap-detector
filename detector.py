@@ -18,7 +18,7 @@ import cv2
 from config import (
     CONFIDENCE_THRESHOLD, NEW_TRACK_CONF,
     MODEL_ONNX_PATH, USE_DIRECTML, NMS_IOU_THRESH,
-    MODEL_NAME, DETECT_CLASSES, HEAD_ZONE_RATIO, INFERENCE_IMGSZ,
+    MODEL_NAME, DETECT_CLASSES, HEAD_ZONE_RATIO, INFERENCE_IMGSZ, CAPTURE_CROP,
     BOTTOM_STRIP_RATIO, HANDS_CENTER_Y_RATIO, HANDS_BOX_HEIGHT_RATIO,
     HANDS_TOP_EDGE_RATIO,
 )
@@ -176,10 +176,14 @@ class Detector:
     def _try_init_directml(self) -> bool:
         try:
             import onnxruntime as ort
-            avail = [p.lower() for p in ort.get_available_providers()]
-            if 'dmlexecutionprovider' not in avail:
-                print("[Detector] WARN: DirectML not available, install onnxruntime-directml")
-                return False
+            # onnxruntime-directml 1.24.x: try get_available_providers, fallback to direct session
+            try:
+                avail = [p.lower() for p in ort.get_available_providers()]
+                if 'dmlexecutionprovider' not in avail:
+                    print("[Detector] WARN: DirectML not available, install onnxruntime-directml")
+                    return False
+            except AttributeError:
+                pass  # older directml version: skip check, try creating session directly
             providers = ['DmlExecutionProvider', 'CPUExecutionProvider']
             self._sess       = ort.InferenceSession(MODEL_ONNX_PATH, providers=providers)
             inp              = self._sess.get_inputs()[0]
@@ -201,11 +205,16 @@ class Detector:
 
     # ── PyTorch 后备 ─────────────────────────────────────────────────────────
     def _init_pytorch(self):
+        import torch
         from ultralytics import YOLO
         print(f"[Detector] 加载 PyTorch 模型 {MODEL_NAME}...")
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self._model = YOLO(MODEL_NAME)
+        self._model.to(device)
         self._mode  = 'pytorch'
-        print(f"[Detector] PyTorch CPU | 屏幕 {self._screen_w}×{self._screen_h}")
+        gpu_name = torch.cuda.get_device_name(0) if device == 'cuda' else 'CPU'
+        crop_info = f"crop={CAPTURE_CROP}px " if CAPTURE_CROP else "fullscreen "
+        print(f"[Detector] PyTorch {gpu_name} | {crop_info}imgsz={INFERENCE_IMGSZ} FP16 | 屏幕 {self._screen_w}x{self._screen_h}")
 
     # ── Letterbox 预处理 ─────────────────────────────────────────────────────
     def _letterbox(self, frame: np.ndarray):
@@ -259,6 +268,17 @@ class Detector:
         boxes[:, [1, 3]] = np.clip((boxes[:, [1, 3]] - pad_y) / scale, 0, frame_h)
         return [(boxes[i].astype(int), float(scores[i])) for i in range(len(boxes))]
 
+    # ── 中心裁剪 ─────────────────────────────────────────────────────────────
+    def _crop_center(self, frame: np.ndarray) -> "tuple[np.ndarray, int, int]":
+        """若 CAPTURE_CROP > 0，从帧中心裁剪正方形区域，返回 (crop, off_x, off_y)。"""
+        if not CAPTURE_CROP or CAPTURE_CROP <= 0:
+            return frame, 0, 0
+        h, w = frame.shape[:2]
+        crop = min(CAPTURE_CROP, h, w)
+        x0 = (w - crop) // 2
+        y0 = (h - crop) // 2
+        return frame[y0:y0 + crop, x0:x0 + crop], x0, y0
+
     # ── 手部/武器过滤 ────────────────────────────────────────────────────────
     def _is_hand(self, x1: int, y1: int, x2: int, y2: int, frame_h: int) -> bool:
         cy_r = (y1 + y2) / 2 / frame_h
@@ -280,18 +300,22 @@ class Detector:
 
     # ── 主接口 ───────────────────────────────────────────────────────────────
     def detect(self, frame: np.ndarray) -> "list[Detection]":
-        h, w  = frame.shape[:2]
-        cx, cy = w // 2, h // 2
+        # 中心裁剪：减少推理区域（CAPTURE_CROP=0则全帧）
+        frame_inp, off_x, off_y = self._crop_center(frame)
+        h_inp, w_inp = frame_inp.shape[:2]
 
         if self._mode == 'directml':
-            inp, scale, pad_x, pad_y = self._letterbox(frame)
+            inp, scale, pad_x, pad_y = self._letterbox(frame_inp)
             raw = self._sess.run(None, {self._input_name: inp})[0]
-            boxes_scores = self._postprocess(raw, scale, pad_x, pad_y, h, w)
+            boxes_scores = self._postprocess(raw, scale, pad_x, pad_y, h_inp, w_inp)
         else:
-            results      = self._model(
-                frame, conf=CONFIDENCE_THRESHOLD,
-                classes=DETECT_CLASSES, imgsz=INFERENCE_IMGSZ, verbose=False,
-            )
+            import torch
+            with torch.inference_mode():
+                results = self._model(
+                    frame_inp, conf=CONFIDENCE_THRESHOLD,
+                    classes=DETECT_CLASSES, imgsz=INFERENCE_IMGSZ,
+                    verbose=False, half=True,
+                )
             boxes_scores = []
             for result in results:
                 for box in result.boxes:
@@ -299,10 +323,17 @@ class Detector:
                     conf = float(box.conf[0])
                     boxes_scores.append((np.array(bxy), conf))
 
+        cx = self._screen_w // 2
+        cy = self._screen_h // 2
+
         detections: list[Detection] = []
         for box, conf in boxes_scores:
-            x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
-            if self._is_hand(x1, y1, x2, y2, h):
+            # 先加偏移量转回屏幕坐标，再用屏幕尺寸过滤手部
+            x1 = int(box[0]) + off_x
+            y1 = int(box[1]) + off_y
+            x2 = int(box[2]) + off_x
+            y2 = int(box[3]) + off_y
+            if self._is_hand(x1, y1, x2, y2, self._screen_h):
                 continue
             detections.append(Detection(x1, y1, x2, y2, conf, _screen_cx=cx, _screen_cy=cy))
 
