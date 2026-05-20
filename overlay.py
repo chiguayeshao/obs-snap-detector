@@ -37,6 +37,7 @@ class Overlay:
         )
         self._canvas.pack(fill=tk.BOTH, expand=True)
         self._make_click_through()
+        self._exclude_from_capture()
         self._root.update_idletasks()
         self._sw = self._root.winfo_screenwidth()
         self._sh = self._root.winfo_screenheight()
@@ -117,6 +118,38 @@ class Overlay:
             )
         except Exception as e:
             print(f"[Overlay] click-through setup failed: {e}")
+
+    def _exclude_from_capture(self):
+        """Prevent dxcam/DXGI from capturing this overlay window.
+
+        WDA_EXCLUDEFROMCAPTURE (0x11) marks the window as invisible to any
+        screen-capture API (DXGI Desktop Duplication, WinRT, BitBlt, etc.).
+        Without this, dxcam captures the green/red boxes drawn on screen and
+        feeds them into every YOLO inference frame. The overlay rectangles
+        drawn over real targets alter their visual appearance, degrading YOLO
+        detection quality and causing unstable track confidence for T3/T4.
+
+        Reference: sunone_aimbot_2 overlay_exclude_from_capture config option
+        (SetWindowDisplayAffinity with WDA_EXCLUDEFROMCAPTURE).
+        Requires Windows 10 version 2004 (Build 19041) or later.
+        """
+        try:
+            self._root.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(self._root.winfo_id())
+            if hwnd == 0:
+                hwnd = self._root.winfo_id()
+            WDA_EXCLUDEFROMCAPTURE = 0x00000011
+            result = ctypes.windll.user32.SetWindowDisplayAffinity(
+                hwnd, WDA_EXCLUDEFROMCAPTURE
+            )
+            if result:
+                print("[Overlay] Excluded from screen capture (WDA_EXCLUDEFROMCAPTURE)")
+            else:
+                err = ctypes.windll.kernel32.GetLastError()
+                print(f"[Overlay] WDA_EXCLUDEFROMCAPTURE failed (err={err})"
+                      f" — overlay visible to dxcam, may affect T3/T4 detection")
+        except Exception as e:
+            print(f"[Overlay] exclude-from-capture error: {e}")
 
     # ── Canvas item pool ──────────────────────────────────────────────────────
 

@@ -27,7 +27,7 @@ TRACKER_MAX_AGE       = 3      # CONFIRMED 轨迹最多允许连续未检测帧�
 TRACKER_MIN_HITS      = 2      # =2: 需要连续2帧检测才显示边框，过滤单帧噪声（防止T3/T4低置信单帧检测产生的扫描闪烁效果）
 TRACKER_CENTER_DIST_FALLBACK = 160.0  # snap-point Stage 1b 回退匹配阈值（像素）：头部snap差≈50px，不同目标≥168px
 TRACKER_DEDUP_DIST   = 170.0           # 去重距离（像素）：同人头部+身体bbox的snap间距≈158px<170px→去重；不同目标snap间距通常>200px不误阻
-TRACKER_REID_DIST    = 60.0            # 重识别距离（像素）：已消失轨迹在此距离内重新出现则复用旧ID（60px：同一目标小于此值，相邻目标通常>100px不误识别）
+TRACKER_REID_DIST    = 100.0           # 重识别距离（像素）：已消失轨迹在此距离内重新出现则复用旧ID（100px：同一目标小于此值，相邻目标通常>200px不误识别）
 TRACKER_REID_TTL     = 500             # 重识别记忆帧数：记住已消失轨迹500帧≈12秒@42fps，用于远目标重识别（检测间隔5-15秒）
 TRACKER_GATE_DIST    = 150.0           # 备用参数（保留兼容）
 # 以下保留兼容旧代码
@@ -50,7 +50,7 @@ SHOW_SNAP_ZONE   = True
 
 # ── 覆盖层稳定参数 ───────────────────────────────────
 OVERLAY_MAX_POOL_SIZE  = 15    # canvas 元素池上限，防长时间运行后画布积累太多项目拖慢渲染
-PRIMARY_SWITCH_MARGIN  = 30    # 主目标存在时：新目标需近30px才切换（防止等距目标间频繁切换）
+PRIMARY_SWITCH_MARGIN  = 10    # 主目标存在时：新目标需近10px才切换（防止等距目标间频繁切换，但允许近目标快速夺回红框）
 PRIMARY_HOLD_FRAMES    = 5     # 主目标消失后：继续保持5帧再切换（防止T2短暂未检测导致T3成红框）
 PRIMARY_ADVANTAGE_PX   = 50    # 主目标消失后：新最近目标需比旧主目标近50px才立即切换（否则等HOLD帧到期）
 BOX_SNAP_PX            = 3     # 坐标像素捕捉阈值：变化<3px 不更新画布，消除微抖视觉噪声

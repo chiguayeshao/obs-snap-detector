@@ -491,7 +491,7 @@ class ByteTracker:
 
         dead: list[_Track] = [
             t for t in self._tracks
-            if (t.state == _TENTATIVE and t.miss_streak > 1)
+            if (t.state == _TENTATIVE and t.miss_streak >= TRACKER_MAX_AGE)
             or (t.state == _CONFIRMED and t.miss_streak >= _effective_max_age(t))
         ]
         for dt in dead:
