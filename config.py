@@ -10,7 +10,7 @@ CAPTURE_MONITOR = 0        # 显示器索引：0 = 主屏幕
 
 # ── AI 检测 ───────────────────────────────────────────
 CONFIDENCE_THRESHOLD  = 0.04   # 绝对过滤阈值：4%兼顾远目标检测（低置信检测进Stage2更新现有轨迹，不创建新轨迹）
-NEW_TRACK_CONF        = 0.06   # 创建新轨迹所需最低置信度（6%，允许远目标T3/T4在6%+时创建轨迹）
+NEW_TRACK_CONF        = 0.04   # 创建新轨迹所需最低置信度（4%=与CONFIDENCE_THRESHOLD一致，允许T4/远目标低置信创建轨迹）
 MODEL_NAME            = "yolo11m.pt"   # CPU 后备模型
 INFERENCE_IMGSZ       = 960    # 2K/960 最佳平衡；640最快（CPU 模式）
 DETECT_CLASSES        = [0]    # COCO: 0=person
