@@ -469,9 +469,13 @@ class ByteTracker:
 
             # Re-identification: if a recently-dead track was at this position,
             # reuse its ID so the target keeps a consistent ID across brief disappearances.
+            # Compare detection bbox CENTER against dead track Kalman CENTER (both stable
+            # regardless of full-body vs partial-body detection type).
+            det_cx = (det.x1 + det.x2) * 0.5
+            det_cy = (det.y1 + det.y2) * 0.5
             reuse_id = None
             for idx, (sx, sy, old_id, _exp) in enumerate(self._dead_snaps):
-                if (sx - dsnx) ** 2 + (sy - dsny) ** 2 < reid_sq:
+                if (sx - det_cx) ** 2 + (sy - det_cy) ** 2 < reid_sq:
                     reuse_id = old_id
                     self._dead_snaps.pop(idx)
                     break
@@ -482,12 +486,30 @@ class ByteTracker:
             active_snaps.append((dsnx, dsny))
 
         # ── 6. Prune dead tracks — record snap positions for re-id first ───────
-        # Adaptive max-age: CONFIRMED tracks survive 3× longer than TENTATIVE ones.
-        # Key insight: once confirmed (hits≥MIN_HITS=2), the track is a real target.
-        # Give it 9 frames of survival so brief YOLO misses don't kill T3/T4 tracks
-        # and cause the "scanning" flicker. TENTATIVE tracks still die fast (3 frames).
+        # Adaptive max-age strategy:
+        # - TENTATIVE tracks: die after MAX_AGE consecutive misses (fast, no ghost boxes)
+        # - CONFIRMED tracks: adaptive survival based on scene context
+        #   * "camera still on scene": other CONFIRMED tracks are actively detected (miss_streak==0)
+        #     → extend survival to MAX_AGE*10 (≈680ms) so rare YOLO misses don't kill T3/T4
+        #   * "camera moved away": no other confirmed tracks recently detected
+        #     → short survival MAX_AGE*3 (≈200ms) so ghost boxes disappear quickly
+        #
+        # Root-cause fix for T3/T4 scanning:
+        # At 30% detection rate per target, P(9 consecutive misses) = 0.7^9 ≈ 4%/block
+        # Over 15 seconds: ~95% probability of at least one death → new ID each time.
+        # With MAX_AGE*10: P(30 consecutive misses) = 0.7^30 ≈ 0.02% → extremely rare deaths.
+        # The extended survival only triggers when other tracks confirm camera is on scene.
+        any_recently_detected = any(
+            t.state == _CONFIRMED and t.miss_streak == 0
+            for t in self._tracks
+        )
+
         def _effective_max_age(t) -> int:
-            return TRACKER_MAX_AGE * 3 if t.state == _CONFIRMED else TRACKER_MAX_AGE
+            if t.state != _CONFIRMED:
+                return TRACKER_MAX_AGE
+            if any_recently_detected:
+                return TRACKER_MAX_AGE * 10  # camera on scene: survive 30 frames (~680ms)
+            return TRACKER_MAX_AGE * 3       # camera away: survive 9 frames (~200ms)
 
         dead: list[_Track] = [
             t for t in self._tracks
@@ -496,9 +518,12 @@ class ByteTracker:
         ]
         for dt in dead:
             # Only remember CONFIRMED tracks for re-id (tentative = unconfirmed false det)
+            # Use Kalman CENTER (cx,cy) instead of snap_ema for stable REID matching:
+            # snap_ema drifts when YOLO alternates full-body vs partial-body detections,
+            # causing >100px position jumps. Kalman center is consistent regardless of bbox type.
             if dt.state == _CONFIRMED:
                 self._dead_snaps.append(
-                    (dt._snap_ema[0], dt._snap_ema[1], dt.id,
+                    (float(dt.kf.x[0]), float(dt.kf.x[1]), dt.id,
                      self._frame_count + TRACKER_REID_TTL)
                 )
         # Expire old dead snaps
