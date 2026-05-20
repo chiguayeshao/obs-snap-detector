@@ -10,7 +10,7 @@ CAPTURE_MONITOR = 0        # 显示器索引：0 = 主屏幕
 
 # ── AI 检测 ───────────────────────────────────────────
 CONFIDENCE_THRESHOLD  = 0.04   # 绝对过滤阈值：4%兼顾远目标检测（低置信检测进Stage2更新现有轨迹，不创建新轨迹）
-NEW_TRACK_CONF        = 0.04   # 创建新轨迹所需最低置信度（4%=与CONFIDENCE_THRESHOLD一致，允许T4/远目标低置信创建轨迹）
+NEW_TRACK_CONF        = 0.06   # 创建新轨迹最低置信度（6%：过滤环境杂物误检，避免假目标框）
 MODEL_NAME            = "yolo11m.pt"   # CPU 后备模型
 INFERENCE_IMGSZ       = 960    # 2K/960 最佳平衡；640最快（CPU 模式）
 DETECT_CLASSES        = [0]    # COCO: 0=person
@@ -40,9 +40,9 @@ JUMP_SCALE            = 150.0
 # FPS 游戏中自己的手/武器永远在屏幕下方，需过滤掉
 BOTTOM_STRIP_RATIO    = 0.90   # 中心 Y > 此值直接丢弃（绝对底部10%）
 HANDS_CENTER_Y_RATIO  = 0.72   # 结合高度判断：中心 Y > 此值 且高度 > 下方阈值 → 丢弃
-HANDS_BOX_HEIGHT_RATIO = 0.08  # 框高 / 画面高 > 此值 且中心偏下 → 判定为手部（降低至0.08覆盖ADS时的小手部框）
-HANDS_BOTTOM_EDGE_RATIO = 0.92 # 边框底边 y2 > 此值 → 底部锚定检测，必定是玩家手部
-HANDS_WIDE_RATIO      = 1.5    # 宽/高 > 此值 且中心 > 0.65 → 横向武器/手臂检测
+HANDS_BOX_HEIGHT_RATIO = 0.08  # 框高 / 画面高 > 此值 且中心偏下 → 判定为手部
+HANDS_TOP_EDGE_RATIO  = 0.60   # 框顶部 y1 > 此值 → 整个框在屏幕下半部分 → 手部/武器
+#   真实目标头部（y1）始终在屏幕上半部分；玩家手部从 60% 以下开始出现
 
 # ── 瞄准点 / 头部区域 ────────────────────────────────
 HEAD_ZONE_RATIO  = 0.20   # 边界框顶部 20% = 头部区域
