@@ -30,8 +30,8 @@ TRACKER_DEDUP_DIST   = 170.0           # 去重距离（像素）：同人头部
 TRACKER_REID_DIST    = 100.0           # 重识别距离（像素）：已消失轨迹在此距离内重新出现则复用旧ID（100px：同一目标小于此值，相邻目标通常>200px不误识别）
 TRACKER_REID_TTL     = 500             # 重识别记忆帧数：记住已消失轨迹500帧≈12秒@42fps，用于远目标重识别（检测间隔5-15秒）
 TRACKER_GATE_DIST    = 150.0           # 备用参数（保留兼容）
-TRACKER_GHOST_MISS_LIMIT = 15         # 幽灵框限制：即便场景中有其他目标在检测，单个轨迹连续超过15帧（~340ms）没有Stage1匹配就强制死亡
-                                       # T3/T4(30%检测率)连续15帧miss概率0.47%→基本不影响；但离开画面的目标必然连续miss>15帧→快速消亡
+TRACKER_GHOST_MISS_LIMIT = 8          # 幽灵框限制：即便场景中有其他目标在检测，单个轨迹连续超过8帧（~180ms@44fps）没有Stage1匹配就强制死亡
+                                       # T3/T4(30%检测率)连续8帧miss概率5.8%→偶尔短暂消失但REID立即恢复；离开画面的目标必然连续miss→快速消亡
 # 以下保留兼容旧代码
 TRACKER_EMA_ALPHA     = 0.25
 TRACKER_TTL           = 10

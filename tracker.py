@@ -530,7 +530,7 @@ class ByteTracker:
                 return TRACKER_MAX_AGE
             if any_recently_detected and t.miss_streak < TRACKER_GHOST_MISS_LIMIT:
                 return TRACKER_MAX_AGE * 10  # camera on scene + track still relevant
-            return TRACKER_MAX_AGE * 3       # camera away OR track too stale → fast death
+            return TRACKER_MAX_AGE * 2       # camera away OR track too stale → fast death (~135ms)
 
         dead: list[_Track] = [
             t for t in self._tracks
