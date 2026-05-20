@@ -24,7 +24,7 @@ from config import (
     TRACKER_IOU_THRESH, TRACKER_HIGH_CONF,
     TRACKER_MAX_AGE, TRACKER_MIN_HITS,
     TRACKER_CENTER_DIST_FALLBACK, TRACKER_DEDUP_DIST, TRACKER_GATE_DIST,
-    TRACKER_REID_DIST, TRACKER_REID_TTL,
+    TRACKER_REID_DIST, TRACKER_REID_TTL, TRACKER_GHOST_MISS_LIMIT,
     HEAD_ZONE_RATIO,
 )
 
@@ -169,6 +169,27 @@ class _Track:
         self._snap_ema = (
             alpha_s * dsnx + (1.0 - alpha_s) * self._snap_ema[0],
             alpha_s * dsny + (1.0 - alpha_s) * self._snap_ema[1],
+        )
+
+    def update_weak(self, det: Detection):
+        """Stage 2 (low-confidence) match: update Kalman + snap_ema position,
+        but do NOT reset miss_streak. This prevents background noise detections
+        (4-6% confidence environment objects) from keeping ghost tracks alive
+        when the camera has moved away from real targets."""
+        cx = (det.x1 + det.x2) * 0.5
+        cy = (det.y1 + det.y2) * 0.5
+        w  = float(det.x2 - det.x1)
+        h  = float(det.y2 - det.y1)
+        self._box = self.kf.update(cx, cy, w, h)
+        # miss_streak intentionally NOT reset — track still counts as "missed" this frame.
+        # snap_ema uses same alpha=0.40 as full update() to keep DEDUP accurate:
+        # low alpha here would let snap_ema drift from actual target position, causing
+        # DEDUP failures (>170px gap) and spurious duplicate tracks on the same target.
+        dh = max(h * HEAD_ZONE_RATIO, 10.0)
+        alpha_s = 0.40
+        self._snap_ema = (
+            alpha_s * cx + (1.0 - alpha_s) * self._snap_ema[0],
+            alpha_s * (float(det.y1) + dh * 0.5) + (1.0 - alpha_s) * self._snap_ema[1],
         )
 
     @property
@@ -435,7 +456,7 @@ class ByteTracker:
             pairs2, _, _ = _greedy_match_by_dist(sdist2, TRACKER_CENTER_DIST_FALLBACK)
             for ti2, di2 in pairs2:
                 orig_ti = rc_idx[ti2]
-                self._tracks[orig_ti].update(low_dets[di2])
+                self._tracks[orig_ti].update_weak(low_dets[di2])
                 still_unmatched_t.discard(orig_ti)
 
         # ── 5. Create new TENTATIVE tracks from unmatched high-conf dets ──────
@@ -488,17 +509,17 @@ class ByteTracker:
         # ── 6. Prune dead tracks — record snap positions for re-id first ───────
         # Adaptive max-age strategy:
         # - TENTATIVE tracks: die after MAX_AGE consecutive misses (fast, no ghost boxes)
-        # - CONFIRMED tracks: adaptive survival based on scene context
-        #   * "camera still on scene": other CONFIRMED tracks are actively detected (miss_streak==0)
-        #     → extend survival to MAX_AGE*10 (≈680ms) so rare YOLO misses don't kill T3/T4
-        #   * "camera moved away": no other confirmed tracks recently detected
+        # - CONFIRMED tracks: adaptive survival based on scene context + per-track limit
+        #   * "camera still on scene" (any Stage-1 match this frame) AND this track's own
+        #     consecutive miss_streak < GHOST_MISS_LIMIT (15 frames):
+        #     → extend survival to MAX_AGE*10 (≈340ms) so rare YOLO misses don't kill T3/T4
+        #   * "camera moved away" OR this track has been missing 15+ consecutive frames:
         #     → short survival MAX_AGE*3 (≈200ms) so ghost boxes disappear quickly
         #
-        # Root-cause fix for T3/T4 scanning:
-        # At 30% detection rate per target, P(9 consecutive misses) = 0.7^9 ≈ 4%/block
-        # Over 15 seconds: ~95% probability of at least one death → new ID each time.
-        # With MAX_AGE*10: P(30 consecutive misses) = 0.7^30 ≈ 0.02% → extremely rare deaths.
-        # The extended survival only triggers when other tracks confirm camera is on scene.
+        # GHOST_MISS_LIMIT=15 is the key: a track that LEFT the screen will have its
+        # miss_streak increase monotonically (15,16,17...→ max_age=9 → immediate death).
+        # A track still IN frame at 30% detection rate hits 15 consecutive misses only
+        # 0.47% of the time → REID cleanly resurrects it with same ID.
         any_recently_detected = any(
             t.state == _CONFIRMED and t.miss_streak == 0
             for t in self._tracks
@@ -507,9 +528,9 @@ class ByteTracker:
         def _effective_max_age(t) -> int:
             if t.state != _CONFIRMED:
                 return TRACKER_MAX_AGE
-            if any_recently_detected:
-                return TRACKER_MAX_AGE * 10  # camera on scene: survive 30 frames (~680ms)
-            return TRACKER_MAX_AGE * 3       # camera away: survive 9 frames (~200ms)
+            if any_recently_detected and t.miss_streak < TRACKER_GHOST_MISS_LIMIT:
+                return TRACKER_MAX_AGE * 10  # camera on scene + track still relevant
+            return TRACKER_MAX_AGE * 3       # camera away OR track too stale → fast death
 
         dead: list[_Track] = [
             t for t in self._tracks
